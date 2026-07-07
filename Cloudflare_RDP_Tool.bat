@@ -1,10 +1,10 @@
 @echo off
-title Cloudflare RDP Tool by JPaasovaara
+title Cloudflare Browser-RDP Tunnel by JPaasovaara
 color 0A
 setlocal EnableDelayedExpansion
 
 :: ============================================================
-:: Cloudflare RDP Tool by JPaasovaara
+:: Cloudflare Browser-RDP Tunnel by JPaasovaara
 :: Makes this Windows PC reachable via browser-based RDP 
 :: using Cloudflare Zero Trust Tunnels.
 :: MIT License - github.com/ToFinToFun/cloudflare-rdp-tunnel
@@ -22,7 +22,7 @@ set "INSTALL_DIR=C:\Program Files\cloudflared"
 
 echo.
 echo ===========================================================
-echo   Cloudflare RDP Tool by JPaasovaara
+echo   Cloudflare Browser-RDP Tunnel by JPaasovaara
 echo   Zero Trust Browser-based Remote Desktop
 echo ===========================================================
 echo.
@@ -451,7 +451,7 @@ if %FAILURES% equ 0 (
 )
 
 echo -----------------------------------------------------------
-echo   Cloudflare RDP Tool by JPaasovaara - MIT License
+echo   Cloudflare Browser-RDP Tunnel by JPaasovaara - MIT License
 echo   https://github.com/ToFinToFun/cloudflare-rdp-tunnel
 echo -----------------------------------------------------------
 echo.
