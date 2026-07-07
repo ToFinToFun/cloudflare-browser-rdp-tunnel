@@ -7,7 +7,7 @@ setlocal EnableDelayedExpansion
 :: Cloudflare Browser-RDP Tunnel by JPaasovaara
 :: Makes this Windows PC reachable via browser-based RDP 
 :: using Cloudflare Zero Trust Tunnels.
-:: MIT License - github.com/ToFinToFun/cloudflare-rdp-tunnel
+:: MIT License - github.com/ToFinToFun/cloudflare-browser-rdp-tunnel
 :: ============================================================
 
 set "CHK_ADMIN=FAIL"
@@ -97,7 +97,7 @@ echo   USEFUL LINKS:
 echo   - Zero Trust Dashboard: https://one.dash.cloudflare.com
 echo   - Add domain to Cloudflare: https://dash.cloudflare.com
 echo   - Cloudflare free plan: https://www.cloudflare.com/plans
-echo   - This project: https://github.com/ToFinToFun/cloudflare-rdp-tunnel
+echo   - This project: https://github.com/ToFinToFun/cloudflare-browser-rdp-tunnel
 echo.
 echo   ---
 echo.
@@ -452,7 +452,7 @@ if %FAILURES% equ 0 (
 
 echo -----------------------------------------------------------
 echo   Cloudflare Browser-RDP Tunnel by JPaasovaara - MIT License
-echo   https://github.com/ToFinToFun/cloudflare-rdp-tunnel
+echo   https://github.com/ToFinToFun/cloudflare-browser-rdp-tunnel
 echo -----------------------------------------------------------
 echo.
 pause
