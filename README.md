@@ -90,7 +90,7 @@ If you ever want to remove the tunnel from your PC:
 
 ## Credits
 
-Created by **Japaasovaara**.
+Created by **JPaasovaara**.
 
 ## License
 

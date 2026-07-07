@@ -1,12 +1,13 @@
 @echo off
-title Cloudflare RDP Tool
+title Cloudflare RDP Tool by JPaasovaara
 color 0A
 setlocal EnableDelayedExpansion
 
 :: ============================================================
-:: Cloudflare RDP Tool
+:: Cloudflare RDP Tool by JPaasovaara
 :: Makes this Windows PC reachable via browser-based RDP 
 :: using Cloudflare Zero Trust Tunnels.
+:: MIT License - github.com/ToFinToFun/cloudflare-rdp-tunnel
 :: ============================================================
 
 set "CHK_ADMIN=FAIL"
@@ -21,9 +22,113 @@ set "INSTALL_DIR=C:\Program Files\cloudflared"
 
 echo.
 echo ===========================================================
-echo   Cloudflare RDP Tool - Installer
+echo   Cloudflare RDP Tool by JPaasovaara
 echo   Zero Trust Browser-based Remote Desktop
 echo ===========================================================
+echo.
+echo   This tool makes your PC accessible via Remote Desktop
+echo   directly in a web browser - from anywhere in the world.
+echo   No VPN or client software needed on the connecting device.
+echo.
+echo   Press [I] to install/manage, or [Q] for FAQ and info.
+echo.
+set /p "MAIN_CHOICE=   Choose [I/Q]: "
+
+if /I "!MAIN_CHOICE!"=="Q" goto :faq
+if /I "!MAIN_CHOICE!"=="I" goto :start
+echo   Invalid choice.
+pause
+exit /b 1
+
+:: -------------------------------------------------------
+:: FAQ / INFO
+:: -------------------------------------------------------
+:faq
+echo.
+echo ===========================================================
+echo   FAQ - How it works
+echo ===========================================================
+echo.
+echo   HOW DOES IT WORK?
+echo   This script installs 'cloudflared' as a hidden Windows
+echo   service. It creates an outbound tunnel to Cloudflare's
+echo   network, making your PC's RDP port (3389) accessible
+echo   via a secure HTTPS address in any web browser.
+echo.
+echo   The tunnel is OUTBOUND only - no ports are opened on
+echo   your router or firewall. The service starts at boot,
+echo   survives sleep/hibernate, and auto-restarts on crash.
+echo.
+echo   ---
+echo.
+echo   WHAT DO I NEED?
+echo   1. Windows 10/11 Pro, Enterprise, or Education
+echo      (Windows Home does NOT support RDP)
+echo   2. A domain name with DNS managed by Cloudflare
+echo   3. A free Cloudflare account (Zero Trust is free
+echo      for up to 50 users)
+echo   4. A Tunnel Token (see below how to get one)
+echo.
+echo   ---
+echo.
+echo   HOW DO I GET A TUNNEL TOKEN?
+echo   1. Go to: https://one.dash.cloudflare.com
+echo   2. Navigate to: Networks ^> Tunnels
+echo   3. Click "Create a tunnel" ^> Select "Cloudflared"
+echo   4. Name your tunnel (e.g. "My-Laptop")
+echo   5. On the install page, copy the token string
+echo      (the long text after "service install")
+echo   6. Click Next, then configure Public Hostname:
+echo      - Subdomain: e.g. "rdp"
+echo      - Domain: your domain
+echo      - Service Type: RDP
+echo      - URL: localhost:3389
+echo   7. Save the tunnel
+echo.
+echo   Then protect it with Access:
+echo   8. Go to: Access ^> Applications ^> Add application
+echo   9. Choose "Self-hosted", enter your hostname
+echo   10. Under Browser Rendering, select "RDP"
+echo   11. Create a policy to allow your email (OTP)
+echo.
+echo   ---
+echo.
+echo   USEFUL LINKS:
+echo   - Zero Trust Dashboard: https://one.dash.cloudflare.com
+echo   - Add domain to Cloudflare: https://dash.cloudflare.com
+echo   - Cloudflare free plan: https://www.cloudflare.com/plans
+echo   - This project: https://github.com/ToFinToFun/cloudflare-rdp-tunnel
+echo.
+echo   ---
+echo.
+echo   IS IT FREE?
+echo   Cloudflare Zero Trust is free for up to 50 users.
+echo   You do need to own a domain name (~$10/year) and have
+echo   its DNS managed by Cloudflare (free).
+echo.
+echo   ---
+echo.
+echo   IS IT SAFE?
+echo   - The tunnel is outbound only (no open ports)
+echo   - Access is protected by Cloudflare Access (OTP/SSO)
+echo   - RDP uses Network Level Authentication (NLA)
+echo   - The tunnel token only grants connection rights to
+echo     one specific tunnel - not your Cloudflare account
+echo.
+echo ===========================================================
+echo.
+echo   Press [I] to proceed with installation, or [X] to exit.
+echo.
+set /p "FAQ_CHOICE=   Choose [I/X]: "
+if /I "!FAQ_CHOICE!"=="I" goto :start
+echo   Exiting.
+pause
+exit /b 0
+
+:: -------------------------------------------------------
+:: START
+:: -------------------------------------------------------
+:start
 echo.
 
 :: -------------------------------------------------------
@@ -141,23 +246,28 @@ echo ===========================================================
 echo   Tunnel Configuration
 echo ===========================================================
 echo.
-echo   Please enter your Cloudflare Tunnel Token.
-echo   (You can find this in the Zero Trust Dashboard when 
-echo   creating a new tunnel)
+echo   Enter your Cloudflare Tunnel Token.
+echo   (Found in Zero Trust Dashboard ^> Networks ^> Tunnels
+echo    when creating or viewing a tunnel)
+echo.
+echo   Tip: Press [Q] for FAQ if you don't have a token yet.
 echo.
 set /p "CHOSEN_TOKEN=   Tunnel token: "
-echo.
-echo   Please enter the public hostname you configured for this tunnel.
-echo   (e.g. rdp.yourdomain.com)
-echo.
-set /p "CHOSEN_NAME=   Public Hostname: "
-echo.
+
+if /I "!CHOSEN_TOKEN!"=="Q" goto :faq
 
 if "!CHOSEN_TOKEN!"=="" (
     echo   [X] No token entered. Aborting.
     pause
     exit /b 1
 )
+
+echo.
+echo   Enter the public hostname you configured for this tunnel.
+echo   (e.g. rdp.yourdomain.com)
+echo.
+set /p "CHOSEN_NAME=   Public hostname: "
+
 if "!CHOSEN_NAME!"=="" (
     echo   [X] No hostname entered. Aborting.
     pause
@@ -167,6 +277,7 @@ if "!CHOSEN_NAME!"=="" (
 :: -------------------------------------------------------
 :: STEP 1: Enable Remote Desktop
 :: -------------------------------------------------------
+echo.
 echo [1/5] Enabling Remote Desktop...
 
 reg add "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f >nul 2>&1
@@ -333,15 +444,16 @@ if %FAILURES% equ 0 (
     echo   - Auto-restarts on crash (within 10 seconds)
     echo   - Works on any network (WiFi, ethernet, mobile hotspot)
     echo.
-    echo   You can now close this window.
-    echo.
 ) else (
     echo.
     echo   [!] %FAILURES% step(s) failed. See details above.
     echo.
 )
 
-echo ===========================================================
+echo -----------------------------------------------------------
+echo   Cloudflare RDP Tool by JPaasovaara - MIT License
+echo   https://github.com/ToFinToFun/cloudflare-rdp-tunnel
+echo -----------------------------------------------------------
 echo.
 pause
 exit /b %FAILURES%
