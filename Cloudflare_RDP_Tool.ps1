@@ -363,42 +363,46 @@ function Show-AzureADDiagnostics {
     Write-Host "  CHECK 3: Remote Desktop Users group" -ForegroundColor Cyan
     Write-Host ""
     
-    # Check if Authenticated Users or the Azure AD user is in RDP group
-    $rdpGroup = net localgroup "Remote Desktop Users" 2>$null
-    $hasAuthUsers = $rdpGroup | Select-String "Authenticated Users"
-    $hasNTAuthority = $rdpGroup | Select-String "NT AUTHORITY"
+    # Use SID to find the correct group name regardless of Windows language
+    # S-1-5-32-555 = Remote Desktop Users (all languages)
+    $rdpGroupSID = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-32-555")
+    $rdpGroupName = $rdpGroupSID.Translate([System.Security.Principal.NTAccount]).Value.Split('\')[-1]
     
-    # For Azure AD, check if the SID-based entries exist
-    $currentSid = ([System.Security.Principal.WindowsIdentity]::GetCurrent()).User.Value
-    $hasSidEntry = $rdpGroup | Select-String $currentSid
+    # S-1-5-11 = Authenticated Users (all languages)
+    $authUsersSID = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-11")
+    $authUsersName = $authUsersSID.Translate([System.Security.Principal.NTAccount]).Value
+    
+    Write-Host "  Group name (localized): $rdpGroupName" -ForegroundColor Gray
+    
+    # Check current members
+    $rdpGroup = net localgroup "$rdpGroupName" 2>$null
+    $hasAuthUsers = $rdpGroup | Select-String ([regex]::Escape($authUsersName))
     
     # Show current members
-    Write-Host "  Current Remote Desktop Users members:" -ForegroundColor White
-    $memberLines = $rdpGroup | Where-Object { $_ -match "^\S" -and $_ -notmatch "^(The command|Members|---)" }
-    if ($memberLines) {
-        foreach ($m in $memberLines) {
-            if ($m.Trim()) { Write-Host "    - $($m.Trim())" }
+    Write-Host "  Current members:" -ForegroundColor White
+    $inMembers = $false
+    foreach ($line in $rdpGroup) {
+        if ($line -match "^---") { $inMembers = $true; continue }
+        if ($inMembers -and $line -match "\S" -and $line -notmatch "(kommandot|command completed)") {
+            Write-Host "    - $($line.Trim())"
         }
-    }
-    else {
-        Write-Host "    (none)" -ForegroundColor Yellow
     }
     Write-Host ""
     
     if (-not $hasAuthUsers) {
         $issuesFound++
-        Write-Host "  STATUS: 'Authenticated Users' NOT in Remote Desktop Users" -ForegroundColor Yellow
+        Write-Host "  STATUS: '$authUsersName' NOT in $rdpGroupName" -ForegroundColor Yellow
         Write-Host ""
         Write-Host "  PROBLEM:" -ForegroundColor Yellow
         Write-Host "  On Azure AD joined devices, adding specific Azure AD users"
-        Write-Host "  to the RDP group can be unreliable. Adding 'Authenticated"
-        Write-Host "  Users' ensures anyone who can authenticate (with correct"
+        Write-Host "  to the RDP group can be unreliable. Adding '$authUsersName'"
+        Write-Host "  ensures anyone who can authenticate (with correct"
         Write-Host "  password) can use RDP."
         Write-Host ""
-        Write-Host "  FIX: Add 'Authenticated Users' to Remote Desktop Users" -ForegroundColor Yellow
+        Write-Host "  FIX: Add '$authUsersName' to $rdpGroupName" -ForegroundColor Yellow
         Write-Host ""
         Write-Host "  WHAT THIS CHANGES:" -ForegroundColor White
-        Write-Host "  - Adds 'Authenticated Users' to local 'Remote Desktop Users' group"
+        Write-Host "  - Adds '$authUsersName' to local '$rdpGroupName' group"
         Write-Host "  - Any user who knows the correct password can RDP in"
         Write-Host ""
         Write-Host "  RISK ASSESSMENT:" -ForegroundColor White
@@ -410,11 +414,11 @@ function Show-AzureADDiagnostics {
         Write-Host "    membership issues."
         Write-Host ""
         
-        $fix3 = Read-Host "  Apply fix? Add 'Authenticated Users' to RDP group [Y/N]"
+        $fix3 = Read-Host "  Apply fix? Add '$authUsersName' to RDP group [Y/N]"
         if ($fix3 -eq "Y" -or $fix3 -eq "y") {
             try {
-                net localgroup "Remote Desktop Users" "Authenticated Users" /add 2>$null
-                Write-Host "  [OK] 'Authenticated Users' added to Remote Desktop Users." -ForegroundColor Green
+                net localgroup "$rdpGroupName" "$authUsersName" /add 2>$null
+                Write-Host "  [OK] '$authUsersName' added to $rdpGroupName." -ForegroundColor Green
                 $issuesFixed++
             }
             catch {
@@ -426,7 +430,7 @@ function Show-AzureADDiagnostics {
         }
     }
     else {
-        Write-Host "  STATUS: 'Authenticated Users' is in the group (good)" -ForegroundColor Green
+        Write-Host "  STATUS: '$authUsersName' is in the group (good)" -ForegroundColor Green
     }
     
     # ---------------------------------------------------------------
@@ -707,7 +711,9 @@ try {
     Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0 -Force
     # NLA will be handled by Azure AD check - set to enabled by default for non-Azure AD
     Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "UserAuthentication" -Value 1 -Force
+    # Enable firewall rules for RDP (try both English and Swedish group names)
     Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
+    Enable-NetFirewallRule -DisplayGroup "Fjärrskrivbord" -ErrorAction SilentlyContinue
     Write-Host "  [OK] Remote Desktop enabled (NLA active)." -ForegroundColor Green
     $Results["Remote Desktop"] = "OK"
 }
