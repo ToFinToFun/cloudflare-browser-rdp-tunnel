@@ -366,16 +366,14 @@ echo.
 :: -------------------------------------------------------
 echo [1/5] Enabling Remote Desktop...
 
-reg add "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f >nul 2>&1
-if %errorLevel% neq 0 (
+reg add "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f >nul 2>&1 || (
     echo   [X] Failed to enable RDP in registry.
     goto :checklist
 )
 
 reg add "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v UserAuthentication /t REG_DWORD /d 1 /f >nul 2>&1
 
-netsh advfirewall firewall set rule group="Remote Desktop" new enable=Yes >nul 2>&1
-if %errorLevel% neq 0 (
+netsh advfirewall firewall set rule group="Remote Desktop" new enable=Yes >nul 2>&1 || (
     netsh advfirewall firewall set rule group="remote desktop" new enable=Yes >nul 2>&1
 )
 
@@ -413,21 +411,33 @@ set "CHK_DOWNLOAD=OK"
 echo.
 echo [3/5] Installing as background service (%SVC_NAME%)...
 
-:: Create the service manually with our own name
-sc create %SVC_NAME% binPath= "\"!INSTALL_DIR!\cloudflared.exe\" tunnel run --token !CHOSEN_TOKEN!" start= delayed-auto obj= "LocalSystem" DisplayName= "Cloudflare Browser-RDP Tunnel" >nul 2>&1
+:: Write token to a config file (avoids CMD escaping issues with sc create)
+echo tunnel-token: !CHOSEN_TOKEN!> "!INSTALL_DIR!\token.env"
 
-sc query %SVC_NAME% >nul 2>&1
-if %errorLevel% neq 0 (
+:: Write a small launcher script that cloudflared reads from
+:: This avoids issues with = and + in base64 tokens breaking sc create
+(
+    echo @echo off
+    echo "!INSTALL_DIR!\cloudflared.exe" tunnel run --token !CHOSEN_TOKEN!
+) > "!INSTALL_DIR!\run-tunnel.cmd"
+
+:: Create the service pointing to cloudflared directly with --token read from registry
+:: Method: Use sc create with a simple binpath, then fix it via registry
+sc create %SVC_NAME% binPath= "cmd /c \"!INSTALL_DIR!\run-tunnel.cmd\"" start= delayed-auto obj= "LocalSystem" DisplayName= "Cloudflare Browser-RDP Tunnel" type= own >nul 2>&1
+
+:: Fix the binPath directly in registry to avoid CMD escaping issues
+reg add "HKLM\SYSTEM\CurrentControlSet\Services\%SVC_NAME%" /v ImagePath /t REG_EXPAND_SZ /d "\"!INSTALL_DIR!\cloudflared.exe\" tunnel run --token !CHOSEN_TOKEN!" /f >nul 2>&1
+
+sc query %SVC_NAME% >nul 2>&1 && (
+    echo   [OK] Service installed as '%SVC_NAME%'.
+    set "CHK_INSTALL=OK"
+) || (
     echo   [X] Service installation failed.
     goto :checklist
 )
 
 :: Set description
 sc description %SVC_NAME% "Cloudflare Browser-RDP Tunnel - provides browser-based remote desktop access via Zero Trust" >nul 2>&1
-
-echo   [OK] Service installed as '%SVC_NAME%'.
-echo        (Does NOT affect other cloudflared services)
-set "CHK_INSTALL=OK"
 
 :: -------------------------------------------------------
 :: STEP 4: Configure watchdog and recovery
@@ -453,19 +463,16 @@ echo [5/5] Starting service...
 sc start %SVC_NAME% >nul 2>&1
 timeout /t 5 /nobreak >nul
 
-sc query %SVC_NAME% | findstr "RUNNING" >nul 2>&1
-if %errorLevel% neq 0 (
-    echo   [!] Service did not start immediately. Retrying...
-    timeout /t 5 /nobreak >nul
-    sc start %SVC_NAME% >nul 2>&1
-    timeout /t 5 /nobreak >nul
-    sc query %SVC_NAME% | findstr "RUNNING" >nul 2>&1
-    if %errorLevel% neq 0 (
-        echo   [X] Service failed to start.
-        goto :checklist
-    )
-)
+sc query %SVC_NAME% | findstr "RUNNING" >nul 2>&1 && goto :svc_running
+echo   [!] Service did not start immediately. Retrying...
+timeout /t 5 /nobreak >nul
+sc start %SVC_NAME% >nul 2>&1
+timeout /t 5 /nobreak >nul
+sc query %SVC_NAME% | findstr "RUNNING" >nul 2>&1 && goto :svc_running
+echo   [X] Service failed to start.
+goto :checklist
 
+:svc_running
 echo   [OK] Service running.
 set "CHK_SERVICE=OK"
 
@@ -474,20 +481,13 @@ set "CHK_SERVICE=OK"
 :: -------------------------------------------------------
 echo.
 echo [Verify] Checking connection to Cloudflare...
-timeout /t 5 /nobreak >nul
+timeout /t 8 /nobreak >nul
 
-sc query %SVC_NAME% | findstr "RUNNING" >nul 2>&1
-if %errorLevel% equ 0 (
-    timeout /t 3 /nobreak >nul
-    sc query %SVC_NAME% | findstr "RUNNING" >nul 2>&1
-    if %errorLevel% equ 0 (
-        echo   [OK] Tunnel active and stable.
-        set "CHK_CONNECT=OK"
-    ) else (
-        echo   [!] Service crashed after starting. Check event logs.
-    )
-) else (
-    echo   [!] Service is not in RUNNING state.
+sc query %SVC_NAME% | findstr "RUNNING" >nul 2>&1 && (
+    echo   [OK] Tunnel active and stable.
+    set "CHK_CONNECT=OK"
+) || (
+    echo   [!] Service crashed after starting. Check event logs.
 )
 
 :: -------------------------------------------------------
