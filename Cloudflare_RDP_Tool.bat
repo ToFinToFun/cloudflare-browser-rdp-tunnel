@@ -51,8 +51,7 @@ echo   directly in a web browser - from anywhere in the world.
 echo   No VPN or client software needed on the connecting device.
 echo.
 echo   NOTE: This installs as a SEPARATE service (cloudflared-rdp)
-echo   and will NOT affect any existing cloudflared installations
-echo   (e.g. Seafile, other tunnels).
+echo   and will NOT affect any existing cloudflared tunnels.
 echo.
 echo   Press [I] to install/manage, or [Q] for FAQ and info.
 echo.
@@ -173,8 +172,7 @@ echo.
 :: PRE-CHECK: Administrator privileges
 :: -------------------------------------------------------
 echo [Pre-check] Verifying administrator privileges...
-net session >nul 2>&1
-if %errorLevel% neq 0 (
+net session >nul 2>&1 || (
     echo.
     echo   [X] ABORTING - This script must be run as Administrator.
     echo       Right-click the file and select "Run as administrator".
@@ -191,8 +189,7 @@ echo.
 :: -------------------------------------------------------
 echo [Pre-check] Verifying Windows edition (RDP support)...
 
-reg query "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections >nul 2>&1
-if %errorLevel% neq 0 (
+reg query "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections >nul 2>&1 || (
     echo.
     echo   [X] ABORTING - This Windows edition does NOT support Remote Desktop.
     echo       RDP requires Windows Pro, Enterprise, or Education.
@@ -204,10 +201,9 @@ if %errorLevel% neq 0 (
 )
 
 for /f "tokens=2 delims=:" %%a in ('systeminfo ^| findstr /C:"OS Name"') do set "OSNAME=%%a"
-echo %OSNAME% | findstr /I "Home" >nul 2>&1
-if %errorLevel% equ 0 (
+echo !OSNAME! | findstr /I "Home" >nul 2>&1 && (
     echo.
-    echo   [X] ABORTING - Windows Home detected: %OSNAME%
+    echo   [X] ABORTING - Windows Home detected: !OSNAME!
     echo       RDP requires Windows Pro, Enterprise, or Education.
     echo.
     pause
@@ -224,66 +220,69 @@ echo.
 :: -------------------------------------------------------
 echo [Detect] Checking for existing Browser-RDP installation...
 
-sc query %SVC_NAME% >nul 2>&1
-if %errorLevel% equ 0 (
-    echo.
-    echo   A Browser-RDP tunnel is already installed on this PC.
-    echo.
-    echo   What would you like to do?
-    echo.
-    echo     [R] Reinstall / Change address
-    echo         (removes current tunnel, then shows address menu)
-    echo     [U] Uninstall completely
-    echo         (removes the RDP tunnel service from this PC)
-    echo     [Q] Quit - do nothing
-    echo.
-    set /p "EXISTING_CHOICE=   Choose [R/U/Q]: "
+sc query %SVC_NAME% >nul 2>&1 && goto :found_existing
+goto :no_existing
 
-    if /I "!EXISTING_CHOICE!"=="Q" (
-        echo.
-        echo   Cancelled. No changes made.
-        pause
-        exit /b 0
-    )
+:found_existing
+echo.
+echo   A Browser-RDP tunnel is already installed on this PC.
+echo.
+echo   What would you like to do?
+echo.
+echo     [R] Reinstall / Change address
+echo         (removes current tunnel, then shows address menu)
+echo     [U] Uninstall completely
+echo         (removes the RDP tunnel service from this PC)
+echo     [Q] Quit - do nothing
+echo.
+set /p "EXISTING_CHOICE=   Choose [R/U/Q]: "
 
-    if /I "!EXISTING_CHOICE!"=="U" (
-        echo.
-        echo   Uninstalling Browser-RDP tunnel...
-        sc stop %SVC_NAME% >nul 2>&1
-        timeout /t 3 /nobreak >nul
-        sc delete %SVC_NAME% >nul 2>&1
-        timeout /t 2 /nobreak >nul
-        del "!INSTALL_DIR!\cloudflared.exe" >nul 2>&1
-        rmdir "!INSTALL_DIR!" >nul 2>&1
-        echo   [OK] Browser-RDP tunnel uninstalled successfully.
-        echo       (Other cloudflared services were NOT affected)
-        echo.
-        pause
-        exit /b 0
-    )
-
-    if /I "!EXISTING_CHOICE!"=="R" (
-        echo.
-        echo   Removing current RDP tunnel...
-        sc stop %SVC_NAME% >nul 2>&1
-        timeout /t 3 /nobreak >nul
-        sc delete %SVC_NAME% >nul 2>&1
-        timeout /t 2 /nobreak >nul
-        echo   [OK] Old RDP tunnel removed. Continuing with new setup...
-        echo.
-    ) else (
-        echo   Invalid choice. Aborting.
-        pause
-        exit /b 1
-    )
-) else (
-    echo   [i] No existing Browser-RDP installation found. Proceeding...
+if /I "!EXISTING_CHOICE!"=="Q" (
     echo.
+    echo   Cancelled. No changes made.
+    pause
+    exit /b 0
 )
+
+if /I "!EXISTING_CHOICE!"=="U" (
+    echo.
+    echo   Uninstalling Browser-RDP tunnel...
+    sc stop %SVC_NAME% >nul 2>&1
+    timeout /t 3 /nobreak >nul
+    sc delete %SVC_NAME% >nul 2>&1
+    timeout /t 2 /nobreak >nul
+    del "!INSTALL_DIR!\cloudflared.exe" >nul 2>&1
+    rmdir "!INSTALL_DIR!" >nul 2>&1
+    echo   [OK] Browser-RDP tunnel uninstalled successfully.
+    echo.
+    pause
+    exit /b 0
+)
+
+if /I "!EXISTING_CHOICE!"=="R" (
+    echo.
+    echo   Removing current RDP tunnel...
+    sc stop %SVC_NAME% >nul 2>&1
+    timeout /t 3 /nobreak >nul
+    sc delete %SVC_NAME% >nul 2>&1
+    timeout /t 2 /nobreak >nul
+    echo   [OK] Old RDP tunnel removed. Continuing with new setup...
+    echo.
+    goto :menu
+)
+
+echo   Invalid choice. Aborting.
+pause
+exit /b 1
+
+:no_existing
+echo   [i] No existing Browser-RDP installation found. Proceeding...
+echo.
 
 :: -------------------------------------------------------
 :: MENU: Choose address
 :: -------------------------------------------------------
+:menu
 if !SLOT_COUNT! GTR 0 (
     echo ===========================================================
     echo   Choose an address for this PC:
