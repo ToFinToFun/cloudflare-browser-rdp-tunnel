@@ -252,7 +252,8 @@ if /I "!EXISTING_CHOICE!"=="U" (
     sc delete %SVC_NAME% >nul 2>&1
     timeout /t 2 /nobreak >nul
     del "!INSTALL_DIR!\cloudflared.exe" >nul 2>&1
-    rmdir "!INSTALL_DIR!" >nul 2>&1
+    del "!INSTALL_DIR!\token.txt" >nul 2>&1
+    rmdir /s /q "!INSTALL_DIR!" >nul 2>&1
     echo   [OK] Browser-RDP tunnel uninstalled successfully.
     echo.
     pause
@@ -266,6 +267,9 @@ if /I "!EXISTING_CHOICE!"=="R" (
     timeout /t 3 /nobreak >nul
     sc delete %SVC_NAME% >nul 2>&1
     timeout /t 2 /nobreak >nul
+    del "!INSTALL_DIR!\cloudflared.exe" >nul 2>&1
+    del "!INSTALL_DIR!\token.txt" >nul 2>&1
+    rmdir /s /q "!INSTALL_DIR!" >nul 2>&1
     echo   [OK] Old RDP tunnel removed. Continuing with new setup...
     echo.
     goto :menu
@@ -411,30 +415,34 @@ set "CHK_DOWNLOAD=OK"
 echo.
 echo [3/5] Installing as background service (%SVC_NAME%)...
 
-:: Write token to a config file (avoids CMD escaping issues with sc create)
-echo tunnel-token: !CHOSEN_TOKEN!> "!INSTALL_DIR!\token.env"
+:: Save token to a file - this is the bulletproof method
+:: cloudflared.exe reads the token from here, no CMD escaping needed
+echo !CHOSEN_TOKEN!> "!INSTALL_DIR!\token.txt"
 
-:: Write a small launcher script that cloudflared reads from
-:: This avoids issues with = and + in base64 tokens breaking sc create
+:: Create the service with a simple binpath first (just to register it)
+sc create %SVC_NAME% binPath= "cmd.exe /c echo placeholder" start= delayed-auto obj= "LocalSystem" DisplayName= "Cloudflare Browser-RDP Tunnel" type= own >nul 2>&1
+
+:: Now set the REAL ImagePath via registry (avoids all CMD escaping issues)
+:: We use a .cmd wrapper that reads the token from file
 (
     echo @echo off
-    echo "!INSTALL_DIR!\cloudflared.exe" tunnel run --token !CHOSEN_TOKEN!
+    echo setlocal
+    echo set /p TOKEN=^<"!INSTALL_DIR!\token.txt"
+    echo "!INSTALL_DIR!\cloudflared.exe" tunnel run --token %%TOKEN%%
 ) > "!INSTALL_DIR!\run-tunnel.cmd"
 
-:: Create the service pointing to cloudflared directly with --token read from registry
-:: Method: Use sc create with a simple binpath, then fix it via registry
-sc create %SVC_NAME% binPath= "cmd /c \"!INSTALL_DIR!\run-tunnel.cmd\"" start= delayed-auto obj= "LocalSystem" DisplayName= "Cloudflare Browser-RDP Tunnel" type= own >nul 2>&1
+:: Set ImagePath to our wrapper script
+reg add "HKLM\SYSTEM\CurrentControlSet\Services\%SVC_NAME%" /v ImagePath /t REG_EXPAND_SZ /d "cmd.exe /s /c \"\"!INSTALL_DIR!\run-tunnel.cmd\"\"" /f >nul 2>&1
 
-:: Fix the binPath directly in registry to avoid CMD escaping issues
-reg add "HKLM\SYSTEM\CurrentControlSet\Services\%SVC_NAME%" /v ImagePath /t REG_EXPAND_SZ /d "\"!INSTALL_DIR!\cloudflared.exe\" tunnel run --token !CHOSEN_TOKEN!" /f >nul 2>&1
+:: Verify service was created
+sc query %SVC_NAME% >nul 2>&1 && goto :install_ok
+echo   [X] Service installation failed.
+echo       Try running this script again.
+goto :checklist
 
-sc query %SVC_NAME% >nul 2>&1 && (
-    echo   [OK] Service installed as '%SVC_NAME%'.
-    set "CHK_INSTALL=OK"
-) || (
-    echo   [X] Service installation failed.
-    goto :checklist
-)
+:install_ok
+echo   [OK] Service installed as '%SVC_NAME%'.
+set "CHK_INSTALL=OK"
 
 :: Set description
 sc description %SVC_NAME% "Cloudflare Browser-RDP Tunnel - provides browser-based remote desktop access via Zero Trust" >nul 2>&1
@@ -461,15 +469,15 @@ echo.
 echo [5/5] Starting service...
 
 sc start %SVC_NAME% >nul 2>&1
-timeout /t 5 /nobreak >nul
+timeout /t 8 /nobreak >nul
 
 sc query %SVC_NAME% | findstr "RUNNING" >nul 2>&1 && goto :svc_running
 echo   [!] Service did not start immediately. Retrying...
 timeout /t 5 /nobreak >nul
 sc start %SVC_NAME% >nul 2>&1
-timeout /t 5 /nobreak >nul
+timeout /t 8 /nobreak >nul
 sc query %SVC_NAME% | findstr "RUNNING" >nul 2>&1 && goto :svc_running
-echo   [X] Service failed to start.
+echo   [X] Service failed to start. Check Windows Event Viewer for details.
 goto :checklist
 
 :svc_running
@@ -480,15 +488,16 @@ set "CHK_SERVICE=OK"
 :: VERIFY: Connection to Cloudflare
 :: -------------------------------------------------------
 echo.
-echo [Verify] Checking connection to Cloudflare...
-timeout /t 8 /nobreak >nul
+echo [Verify] Checking tunnel stability (10 seconds)...
+timeout /t 10 /nobreak >nul
 
-sc query %SVC_NAME% | findstr "RUNNING" >nul 2>&1 && (
-    echo   [OK] Tunnel active and stable.
-    set "CHK_CONNECT=OK"
-) || (
-    echo   [!] Service crashed after starting. Check event logs.
-)
+sc query %SVC_NAME% | findstr "RUNNING" >nul 2>&1 && goto :verify_ok
+echo   [!] Service crashed after starting. Check Windows Event Viewer.
+goto :checklist
+
+:verify_ok
+echo   [OK] Tunnel active and stable.
+set "CHK_CONNECT=OK"
 
 :: -------------------------------------------------------
 :: CHECKLIST
@@ -511,16 +520,16 @@ echo.
 echo ===========================================================
 
 set "FAILURES=0"
-if "%CHK_ADMIN%"=="FAIL" set /a FAILURES+=1
-if "%CHK_WINVER%"=="FAIL" set /a FAILURES+=1
-if "%CHK_RDP%"=="FAIL" set /a FAILURES+=1
-if "%CHK_DOWNLOAD%"=="FAIL" set /a FAILURES+=1
-if "%CHK_INSTALL%"=="FAIL" set /a FAILURES+=1
-if "%CHK_WATCHDOG%"=="FAIL" set /a FAILURES+=1
-if "%CHK_SERVICE%"=="FAIL" set /a FAILURES+=1
-if "%CHK_CONNECT%"=="FAIL" set /a FAILURES+=1
+if "!CHK_ADMIN!"=="FAIL" set /a FAILURES+=1
+if "!CHK_WINVER!"=="FAIL" set /a FAILURES+=1
+if "!CHK_RDP!"=="FAIL" set /a FAILURES+=1
+if "!CHK_DOWNLOAD!"=="FAIL" set /a FAILURES+=1
+if "!CHK_INSTALL!"=="FAIL" set /a FAILURES+=1
+if "!CHK_WATCHDOG!"=="FAIL" set /a FAILURES+=1
+if "!CHK_SERVICE!"=="FAIL" set /a FAILURES+=1
+if "!CHK_CONNECT!"=="FAIL" set /a FAILURES+=1
 
-if %FAILURES% equ 0 (
+if !FAILURES! equ 0 (
     echo.
     echo   SUCCESS! This PC is now reachable at:
     echo   https://!CHOSEN_NAME!
@@ -536,7 +545,7 @@ if %FAILURES% equ 0 (
     echo.
 ) else (
     echo.
-    echo   [!] %FAILURES% step(s) failed. See details above.
+    echo   [!] !FAILURES! step(s) failed. See details above.
     echo.
 )
 
@@ -546,4 +555,4 @@ echo   https://github.com/ToFinToFun/cloudflare-browser-rdp-tunnel
 echo -----------------------------------------------------------
 echo.
 pause
-exit /b %FAILURES%
+exit /b !FAILURES!
