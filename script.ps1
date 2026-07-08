@@ -221,6 +221,7 @@ function Test-PKU2UEnabled {
 
 function Show-AzureADDiagnostics {
     param([hashtable]$AzureInfo)
+    $ErrorActionPreference = "Continue"  # Don't terminate on diagnostic errors
     
     Write-Host ""
     Write-Host "===========================================================" -ForegroundColor Yellow
@@ -642,6 +643,7 @@ function Get-CurrentPowerState {
         Reads the current power-related settings from the system.
         Returns a hashtable with boolean values for each setting.
     #>
+    $ErrorActionPreference = "Continue"  # Don't terminate on read errors
     $state = @{
         NicPowerSaveOff    = $false
         NetworkInStandby   = $false
@@ -732,6 +734,7 @@ function Show-PowerMatrix {
         [bool]$ModernStandby,
         [bool]$IsLaptop
     )
+    $ErrorActionPreference = "Continue"  # Don't terminate on display errors
     
     $marker = Get-PowerPreset
     
@@ -870,6 +873,7 @@ function Show-PowerManagement {
     param(
         [switch]$SetupStep  # If true, show compact version with skip option
     )
+    $ErrorActionPreference = "Continue"  # Don't terminate on errors in this UI
     
     $modernStandby = Test-ModernStandby
     $isLaptop = Test-IsLaptop
