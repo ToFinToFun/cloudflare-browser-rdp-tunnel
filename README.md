@@ -12,7 +12,9 @@ This tool installs `cloudflared` as a hidden Windows background service (`cloudf
 - **Network Agnostic:** Works on any network (WiFi, ethernet, mobile hotspot) without port forwarding.
 - **Invisible & Resilient:** Runs as a hidden Windows service. Survives sleep, hibernation, lock screens, and logouts.
 - **Auto-Recovery:** Built-in watchdog restarts the service automatically if it crashes.
-- **Safe:** Installs as a separate service (`cloudflared-rdp`) — will **not** interfere with any existing `cloudflared` installations (e.g., Seafile, other tunnels).
+- **Azure AD / Entra ID Support:** Detects Azure AD joined devices and offers interactive fixes for known RDP compatibility issues.
+- **Power Management:** Built-in presets to keep the PC awake and reachable (MAX, High, Balanced, Low+, Low).
+- **Safe:** Installs as a separate service (`cloudflared-rdp`) — will **not** interfere with any existing `cloudflared` installations.
 - **Pre-configured Slots:** Optionally use a `slots.txt` file to offer a menu of pre-configured addresses.
 
 ## Requirements
@@ -79,17 +81,20 @@ To fix: delete the application and recreate it using the steps above, making sur
 
 Now, go to the Windows PC you want to control remotely.
 
-1. Download `Cloudflare_RDP_Tool.bat` from this repository.
-2. Right-click the file and select **Run as administrator**.
-3. When prompted, enter the **Tunnel Token** you copied in Step 1.
-4. Enter the **Public Hostname** you configured (e.g., `rdp.example.com`).
-5. The script will automatically:
+1. Download this repository (or just `setup.bat` and `script.ps1`).
+2. Right-click `setup.bat` and select **Run as administrator**.
+3. Press **[I]** to install.
+4. When prompted, enter the **Tunnel Token** you copied in Step 1.
+5. Enter the **Public Hostname** you configured (e.g., `rdp.example.com`).
+6. The script will automatically:
    - Verify Windows compatibility (aborts on Windows Home)
-   - Enable Remote Desktop and Network Level Authentication (NLA)
+   - Enable Remote Desktop
+   - Detect Azure AD / Entra ID and offer fixes if needed
    - Download the latest `cloudflared` binary
    - Install it as a hidden service (`cloudflared-rdp`)
    - Configure the watchdog for auto-recovery
    - Start the service and verify the connection
+   - Offer power management configuration
    - Show a checklist of all steps (OK/FAIL)
 
 ## Step 4: Connect!
@@ -100,6 +105,37 @@ From any device (your phone, a hotel computer, a Mac):
 3. You will see the Windows login screen in your browser. Log in with your Windows username and password.
 
 Done!
+
+---
+
+## Power Management
+
+After installation, the script offers to configure power settings to keep the PC awake and reachable. You can also change these later by running the script again and choosing **[P]** from the manage menu.
+
+| Preset | Description |
+|--------|-------------|
+| **[1] MAX** | Never sleeps (AC + battery), lid does nothing, network always on, shutdown button hidden in Start menu (current user only) |
+| **[2] High** | Never sleeps (AC + battery), lid does nothing, network always on |
+| **[3] Balanced** (recommended) | Always awake/connected when charger is plugged in. Normal on battery |
+| **[4] Low+** | Leaves sleep settings alone, but network never sleeps (requires Modern Standby / S0) |
+| **[5] Low** | Resets to Windows defaults (acts as an undo button) |
+
+The script automatically detects whether the PC supports Modern Standby (S0) and marks Low+ as unavailable on PCs with classic S3 sleep.
+
+---
+
+## Azure AD / Entra ID
+
+If the target PC is joined to Azure AD (Microsoft Entra ID), browser-based RDP has known compatibility issues. The script detects this automatically and offers interactive fixes:
+
+1. **NLA (Network Level Authentication)** — Disables NLA which blocks browser RDP clients
+2. **PKU2U Protocol** — Enables Azure AD authentication for RDP
+3. **Remote Desktop Users group** — Adds Authenticated Users to the RDP group
+4. **CredSSP** (optional) — Allows fallback encryption for edge cases
+
+Each fix explains what it changes, the risk level, and asks for confirmation before applying.
+
+**Login format for Azure AD:** Use `AzureAD\YourName` as username (run `whoami` to check). Use your Microsoft account password (NOT your PIN).
 
 ---
 
@@ -133,14 +169,33 @@ See `slots.txt.example` for a template.
 
 ---
 
+## Managing an Existing Installation
+
+Run `setup.bat` as administrator on a PC that already has the tunnel installed. The script detects it and shows:
+
+```
+  [R] Reinstall / Change address
+  [U] Uninstall completely
+  [D] Run diagnostics (Azure AD check)
+  [P] Power management settings
+  [Q] Quit - do nothing
+```
+
+- **[R]** removes the current installation and starts a fresh install
+- **[U]** uninstalls completely (optionally resets power settings)
+- **[D]** runs Azure AD diagnostics without reinstalling
+- **[P]** opens the power management preset menu
+
+---
+
 ## Uninstallation
 
-If you ever want to remove the tunnel from your PC:
-1. Run `Cloudflare_RDP_Tool.bat` as administrator again.
+1. Run `setup.bat` as administrator.
 2. The script will detect the existing installation.
-3. Press `U` to uninstall completely.
+3. Press **[U]** to uninstall completely.
+4. You will be asked if you want to reset power settings to Windows defaults.
 
-Other `cloudflared` services (Seafile, etc.) are never touched.
+Other `cloudflared` services are never touched.
 
 ---
 
@@ -160,6 +215,17 @@ Other `cloudflared` services (Seafile, etc.) are never touched.
 3. When you visit the URL, Cloudflare authenticates you (OTP/SSO).
 4. Cloudflare renders the RDP session directly in your browser.
 5. The PC's physical screen stays locked — nothing is visible locally.
+
+---
+
+## Files
+
+| File | Description |
+|------|-------------|
+| `setup.bat` | Launcher — right-click > Run as Administrator |
+| `script.ps1` | Main PowerShell script (all logic) |
+| `slots.txt` | Pre-configured addresses (optional) |
+| `slots.txt.example` | Template for slots.txt |
 
 ---
 

@@ -1,4 +1,3 @@
-#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
     Cloudflare Browser-RDP Tunnel by JPaasovaara
@@ -10,8 +9,11 @@
     Installs as a separate service (cloudflared-rdp) - does NOT affect
     any existing cloudflared installations.
 
-    Detects Azure AD/Entra ID joined devices and offers to fix common
-    RDP compatibility issues interactively.
+    Features:
+    - Azure AD / Entra ID detection and automatic fix suggestions
+    - Power management presets to keep the PC awake and reachable
+    - Auto-recovery watchdog (survives sleep, logout, crashes)
+    - Works on any network (WiFi, ethernet, mobile hotspot)
 
 .LINK
     https://github.com/ToFinToFun/cloudflare-browser-rdp-tunnel
@@ -29,6 +31,13 @@ $DownloadUrl = "https://github.com/cloudflare/cloudflared/releases/latest/downlo
 $ScriptDir   = Split-Path -Parent $MyInvocation.MyCommand.Path
 $SlotsFile   = Join-Path $ScriptDir "slots.txt"
 
+# --- Power Management Constants ---
+$SUB_BUTTONS      = '4f971e89-eebd-4455-a8de-9e59040e7347'
+$LID_ACTION       = '5ca83367-6e45-459f-a27b-476b1d01c936'
+$CONN_IN_STANDBY  = 'f15576e8-98b7-4186-b944-eafa664402d9'
+$REG_EXPLORER_POL = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer'
+$PM_MARKER_FILE   = Join-Path $env:ProgramData 'RdpAvailability\preset.txt'
+
 # --- Results ---
 $Results = [ordered]@{
     "Administrator"       = "FAIL"
@@ -40,9 +49,13 @@ $Results = [ordered]@{
     "Watchdog"            = "FAIL"
     "Service Start"       = "FAIL"
     "Connection Verify"   = "FAIL"
+    "Power Management"    = "SKIP"
 }
 
-# --- Functions ---
+# ===================================================================
+# FUNCTIONS - UI
+# ===================================================================
+
 function Show-Banner {
     Write-Host ""
     Write-Host "===========================================================" -ForegroundColor Green
@@ -78,28 +91,21 @@ function Show-FAQ {
     Write-Host "  WHAT DO I NEED?" -ForegroundColor Yellow
     Write-Host "  1. Windows 10/11 Pro, Enterprise, or Education"
     Write-Host "  2. A domain name with DNS managed by Cloudflare"
-    Write-Host "  3. A free Cloudflare account (Zero Trust, free up to 50 users)"
-    Write-Host "  4. A Tunnel Token (see below)"
+    Write-Host "  3. A Cloudflare Zero Trust account (free)"
+    Write-Host "  4. A configured tunnel with Browser Rendering: RDP"
     Write-Host ""
     Write-Host "  ---"
     Write-Host ""
-    Write-Host "  HOW DO I GET A TUNNEL TOKEN?" -ForegroundColor Yellow
-    Write-Host "  1. Go to: https://one.dash.cloudflare.com"
-    Write-Host "  2. Navigate to: Networks > Tunnels"
-    Write-Host "  3. Click 'Create a tunnel' > Select 'Cloudflared'"
-    Write-Host "  4. Name your tunnel (e.g. 'My-Laptop')"
-    Write-Host "  5. Copy the token (the long string after 'service install')"
-    Write-Host "  6. Configure Public Hostname:"
-    Write-Host "     - Subdomain: e.g. 'rdp'"
-    Write-Host "     - Domain: your domain"
-    Write-Host "     - Service Type: RDP"
-    Write-Host "     - URL: localhost:3389"
-    Write-Host "  7. Save the tunnel"
-    Write-Host ""
-    Write-Host "  Then protect with Access:"
-    Write-Host "  8. Access > Applications > Add application"
-    Write-Host "  9. Self-hosted, enter hostname, Browser Rendering: RDP"
-    Write-Host "  10. Create policy: allow your email via OTP"
+    Write-Host "  SETUP STEPS (done once by admin):" -ForegroundColor Yellow
+    Write-Host "  1. Create a Cloudflare account and add your domain"
+    Write-Host "  2. Enable Zero Trust (free plan works)"
+    Write-Host "  3. Create a tunnel (Networks > Tunnels)"
+    Write-Host "  4. Add a public hostname with service: RDP"
+    Write-Host "  5. Create an Access Application (type: self-hosted)"
+    Write-Host "  6. Set Browser Rendering: RDP"
+    Write-Host "  7. Create a policy (e.g. allow specific emails via OTP)"
+    Write-Host "  8. Copy the tunnel token"
+    Write-Host "  9. Run this script on the target PC"
     Write-Host ""
     Write-Host "  ---"
     Write-Host ""
@@ -108,6 +114,13 @@ function Show-FAQ {
     Write-Host "  the script will detect it and offer fixes for common"
     Write-Host "  RDP compatibility issues. You will be asked before any"
     Write-Host "  changes are made."
+    Write-Host ""
+    Write-Host "  ---"
+    Write-Host ""
+    Write-Host "  POWER MANAGEMENT:" -ForegroundColor Yellow
+    Write-Host "  After installation, you can configure power settings to"
+    Write-Host "  keep the PC awake and reachable. Five presets available:"
+    Write-Host "  MAX, High, Balanced (recommended), Low+, and Low (reset)."
     Write-Host ""
     Write-Host "  ---"
     Write-Host ""
@@ -122,7 +135,7 @@ function Show-FAQ {
     Write-Host "  IS IT SAFE?" -ForegroundColor Yellow
     Write-Host "  - Outbound only (no open ports)"
     Write-Host "  - Protected by Cloudflare Access (OTP/SSO)"
-    Write-Host "  - RDP uses Network Level Authentication"
+    Write-Host "  - RDP uses Network Level Authentication (unless Azure AD)"
     Write-Host "  - Token only grants tunnel connection rights"
     Write-Host ""
     Write-Host "  SLOTS.TXT:" -ForegroundColor Yellow
@@ -153,12 +166,11 @@ function Show-Checklist {
     Write-Host "===========================================================" -ForegroundColor Green
 }
 
+# ===================================================================
+# FUNCTIONS - AZURE AD
+# ===================================================================
+
 function Test-AzureADJoined {
-    <#
-    .SYNOPSIS
-        Detects if this PC is Azure AD (Entra ID) joined.
-        Returns a hashtable with join status details.
-    #>
     $result = @{
         IsAzureADJoined = $false
         IsHybridJoined  = $false
@@ -189,11 +201,8 @@ function Test-AzureADJoined {
             }
         }
     }
-    catch {
-        # dsregcmd not available - likely not Azure AD
-    }
+    catch { }
     
-    # Also check current user
     $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
     $result.UserName = $currentUser
     
@@ -211,14 +220,7 @@ function Test-PKU2UEnabled {
 }
 
 function Show-AzureADDiagnostics {
-    <#
-    .SYNOPSIS
-        Detects Azure AD RDP issues and offers interactive fixes.
-        Returns $true if all checks pass or user fixed them.
-    #>
-    param(
-        [hashtable]$AzureInfo
-    )
+    param([hashtable]$AzureInfo)
     
     Write-Host ""
     Write-Host "===========================================================" -ForegroundColor Yellow
@@ -243,186 +245,132 @@ function Show-AzureADDiagnostics {
     $issuesFound = 0
     $issuesFixed = 0
     
-    # ---------------------------------------------------------------
-    # CHECK 1: NLA (Network Level Authentication)
-    # ---------------------------------------------------------------
+    # CHECK 1: NLA
     Write-Host ""
     Write-Host "  CHECK 1: Network Level Authentication (NLA)" -ForegroundColor Cyan
     Write-Host ""
     
-    $nlaEnabled = Test-NLAEnabled
-    
-    if ($nlaEnabled) {
+    if (Test-NLAEnabled) {
         $issuesFound++
         Write-Host "  STATUS: NLA is ENABLED (blocking browser-based RDP)" -ForegroundColor Red
         Write-Host ""
         Write-Host "  PROBLEM:" -ForegroundColor Yellow
         Write-Host "  NLA requires the connecting client to authenticate BEFORE"
-        Write-Host "  the RDP session starts. Browser-based RDP clients (like"
-        Write-Host "  Cloudflare's) cannot perform NLA with Azure AD credentials"
-        Write-Host "  because they don't support PKU2U protocol."
-        Write-Host ""
-        Write-Host "  This is why you see 'Unable to connect to your remote desktop'"
-        Write-Host "  even with correct username and password."
+        Write-Host "  the RDP session starts. Browser-based RDP clients cannot"
+        Write-Host "  perform NLA with Azure AD credentials."
         Write-Host ""
         Write-Host "  FIX: Disable NLA (Network Level Authentication)" -ForegroundColor Yellow
         Write-Host ""
         Write-Host "  WHAT THIS CHANGES:" -ForegroundColor White
         Write-Host "  - Registry: HKLM\...\RDP-Tcp\UserAuthentication = 0"
-        Write-Host "  - RDP clients will authenticate AFTER connecting"
-        Write-Host "    (credentials sent to Windows login screen directly)"
+        Write-Host "  - RDP clients authenticate AFTER connecting"
         Write-Host ""
-        Write-Host "  RISK ASSESSMENT:" -ForegroundColor White
-        Write-Host "  - LOW RISK in your setup. Your RDP port is NOT exposed to"
-        Write-Host "    the internet. Access is only possible through Cloudflare"
-        Write-Host "    Zero Trust (which already requires OTP authentication)."
-        Write-Host "  - Without NLA, an attacker would need to pass Cloudflare"
-        Write-Host "    Access first, then still know the Windows password."
-        Write-Host "  - NLA mainly protects against brute-force on open RDP ports"
-        Write-Host "    (port 3389 exposed to internet) - which does NOT apply here."
+        Write-Host "  RISK: LOW - RDP port is NOT exposed to internet." -ForegroundColor White
+        Write-Host "  Cloudflare Zero Trust (OTP) protects access." -ForegroundColor White
         Write-Host ""
         
-        $fix1 = Read-Host "  Apply fix? Disable NLA [Y/N]"
-        if ($fix1 -eq "Y" -or $fix1 -eq "y") {
+        $fix = Read-Host "  Apply fix? Disable NLA [Y/N]"
+        if ($fix -match '^[yY]') {
             try {
                 Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "UserAuthentication" -Value 0 -Force
                 Write-Host "  [OK] NLA disabled." -ForegroundColor Green
                 $issuesFixed++
             }
-            catch {
-                Write-Host "  [X] Failed to disable NLA: $_" -ForegroundColor Red
-            }
+            catch { Write-Host "  [X] Failed: $_" -ForegroundColor Red }
         }
         else {
-            Write-Host "  [--] Skipped. NLA remains enabled." -ForegroundColor Yellow
-            Write-Host "       Note: Browser RDP will likely NOT work with Azure AD." -ForegroundColor Yellow
+            Write-Host "  [--] Skipped. Browser RDP will likely NOT work." -ForegroundColor Yellow
         }
     }
     else {
-        Write-Host "  STATUS: NLA is already DISABLED (good for browser RDP)" -ForegroundColor Green
+        Write-Host "  STATUS: NLA already DISABLED (good)" -ForegroundColor Green
     }
     
-    # ---------------------------------------------------------------
-    # CHECK 2: PKU2U (online identity authentication)
-    # ---------------------------------------------------------------
+    # CHECK 2: PKU2U
     Write-Host ""
     Write-Host "  CHECK 2: PKU2U Protocol (Azure AD authentication)" -ForegroundColor Cyan
     Write-Host ""
     
-    $pku2uEnabled = Test-PKU2UEnabled
-    
-    if (-not $pku2uEnabled) {
+    if (-not (Test-PKU2UEnabled)) {
         $issuesFound++
         Write-Host "  STATUS: PKU2U is DISABLED" -ForegroundColor Yellow
         Write-Host ""
         Write-Host "  PROBLEM:" -ForegroundColor Yellow
         Write-Host "  PKU2U is the protocol Windows uses to authenticate Azure AD"
-        Write-Host "  users for RDP connections. Without it, Azure AD credentials"
-        Write-Host "  may not be accepted even if NLA is disabled."
+        Write-Host "  users for RDP connections."
         Write-Host ""
         Write-Host "  FIX: Enable PKU2U protocol" -ForegroundColor Yellow
         Write-Host ""
         Write-Host "  WHAT THIS CHANGES:" -ForegroundColor White
         Write-Host "  - Registry: HKLM\SYSTEM\...\Lsa\Pku2u\AllowOnlineID = 1"
-        Write-Host "  - Allows Windows to verify Azure AD identities for RDP"
         Write-Host ""
-        Write-Host "  RISK ASSESSMENT:" -ForegroundColor White
-        Write-Host "  - VERY LOW RISK. This is Microsoft's own recommended setting"
-        Write-Host "    for Azure AD joined devices that need RDP."
-        Write-Host "  - It only enables an authentication protocol - it does not"
-        Write-Host "    open any ports or weaken any passwords."
+        Write-Host "  RISK: VERY LOW - Microsoft's recommended setting." -ForegroundColor White
         Write-Host ""
         
-        $fix2 = Read-Host "  Apply fix? Enable PKU2U [Y/N]"
-        if ($fix2 -eq "Y" -or $fix2 -eq "y") {
+        $fix = Read-Host "  Apply fix? Enable PKU2U [Y/N]"
+        if ($fix -match '^[yY]') {
             try {
                 $regPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\Pku2u"
-                if (-not (Test-Path $regPath)) {
-                    New-Item -Path $regPath -Force | Out-Null
-                }
+                if (-not (Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
                 Set-ItemProperty -Path $regPath -Name "AllowOnlineID" -Value 1 -Type DWord -Force
                 Write-Host "  [OK] PKU2U enabled." -ForegroundColor Green
                 $issuesFixed++
             }
-            catch {
-                Write-Host "  [X] Failed to enable PKU2U: $_" -ForegroundColor Red
-            }
+            catch { Write-Host "  [X] Failed: $_" -ForegroundColor Red }
         }
         else {
-            Write-Host "  [--] Skipped. PKU2U remains disabled." -ForegroundColor Yellow
+            Write-Host "  [--] Skipped." -ForegroundColor Yellow
         }
     }
     else {
-        Write-Host "  STATUS: PKU2U is already ENABLED (good)" -ForegroundColor Green
+        Write-Host "  STATUS: PKU2U already ENABLED (good)" -ForegroundColor Green
     }
     
-    # ---------------------------------------------------------------
-    # CHECK 3: Remote Desktop Users group
-    # ---------------------------------------------------------------
+    # CHECK 3: Remote Desktop Users group (SID-based, language-independent)
     Write-Host ""
     Write-Host "  CHECK 3: Remote Desktop Users group" -ForegroundColor Cyan
     Write-Host ""
     
-    # Use SID to find the correct group name regardless of Windows language
-    # S-1-5-32-555 = Remote Desktop Users (all languages)
     $rdpGroupSID = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-32-555")
     $rdpGroupName = $rdpGroupSID.Translate([System.Security.Principal.NTAccount]).Value.Split('\')[-1]
-    
-    # S-1-5-11 = Authenticated Users (all languages)
     $authUsersSID = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-11")
     $authUsersName = $authUsersSID.Translate([System.Security.Principal.NTAccount]).Value
+    # Get just the short name for net localgroup (without domain prefix)
+    $authUsersShort = $authUsersName.Split('\')[-1]
     
-    Write-Host "  Group name (localized): $rdpGroupName" -ForegroundColor Gray
+    Write-Host "  Group: $rdpGroupName" -ForegroundColor Gray
     
-    # Check current members
     $rdpGroup = net localgroup "$rdpGroupName" 2>$null
-    $hasAuthUsers = $rdpGroup | Select-String ([regex]::Escape($authUsersName))
-    
-    # Show current members
-    Write-Host "  Current members:" -ForegroundColor White
-    $inMembers = $false
-    foreach ($line in $rdpGroup) {
-        if ($line -match "^---") { $inMembers = $true; continue }
-        if ($inMembers -and $line -match "\S" -and $line -notmatch "(kommandot|command completed)") {
-            Write-Host "    - $($line.Trim())"
-        }
-    }
-    Write-Host ""
+    $hasAuthUsers = $rdpGroup | Select-String ([regex]::Escape($authUsersShort))
     
     if (-not $hasAuthUsers) {
         $issuesFound++
-        Write-Host "  STATUS: '$authUsersName' NOT in $rdpGroupName" -ForegroundColor Yellow
+        Write-Host "  STATUS: '$authUsersShort' NOT in $rdpGroupName" -ForegroundColor Yellow
         Write-Host ""
-        Write-Host "  PROBLEM:" -ForegroundColor Yellow
-        Write-Host "  On Azure AD joined devices, adding specific Azure AD users"
-        Write-Host "  to the RDP group can be unreliable. Adding '$authUsersName'"
-        Write-Host "  ensures anyone who can authenticate (with correct"
-        Write-Host "  password) can use RDP."
+        Write-Host "  FIX: Add '$authUsersShort' to $rdpGroupName" -ForegroundColor Yellow
         Write-Host ""
-        Write-Host "  FIX: Add '$authUsersName' to $rdpGroupName" -ForegroundColor Yellow
-        Write-Host ""
-        Write-Host "  WHAT THIS CHANGES:" -ForegroundColor White
-        Write-Host "  - Adds '$authUsersName' to local '$rdpGroupName' group"
-        Write-Host "  - Any user who knows the correct password can RDP in"
-        Write-Host ""
-        Write-Host "  RISK ASSESSMENT:" -ForegroundColor White
-        Write-Host "  - LOW RISK in your setup. Access is gated by:"
-        Write-Host "    1. Cloudflare Zero Trust (OTP email verification)"
-        Write-Host "    2. Windows login password"
-        Write-Host "  - This does NOT bypass any password requirement."
-        Write-Host "  - It only ensures Azure AD users aren't blocked by group"
-        Write-Host "    membership issues."
+        Write-Host "  RISK: LOW - Password still required for RDP access." -ForegroundColor White
         Write-Host ""
         
-        $fix3 = Read-Host "  Apply fix? Add '$authUsersName' to RDP group [Y/N]"
-        if ($fix3 -eq "Y" -or $fix3 -eq "y") {
+        $fix = Read-Host "  Apply fix? [Y/N]"
+        if ($fix -match '^[yY]') {
             try {
-                net localgroup "$rdpGroupName" "$authUsersName" /add 2>$null
-                Write-Host "  [OK] '$authUsersName' added to $rdpGroupName." -ForegroundColor Green
+                # Use SID-based addition via PowerShell for language independence
+                $group = [ADSI]"WinNT://./$rdpGroupName,group"
+                $group.Add("WinNT://S-1-5-11")
+                Write-Host "  [OK] '$authUsersShort' added to $rdpGroupName." -ForegroundColor Green
                 $issuesFixed++
             }
             catch {
-                Write-Host "  [X] Failed: $_" -ForegroundColor Red
+                # Fallback to net localgroup
+                $netResult = net localgroup "$rdpGroupName" "$authUsersShort" /add 2>&1
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Host "  [OK] '$authUsersShort' added to $rdpGroupName." -ForegroundColor Green
+                    $issuesFixed++
+                }
+                else {
+                    Write-Host "  [X] Failed: $netResult" -ForegroundColor Red
+                }
             }
         }
         else {
@@ -430,14 +378,12 @@ function Show-AzureADDiagnostics {
         }
     }
     else {
-        Write-Host "  STATUS: '$authUsersName' is in the group (good)" -ForegroundColor Green
+        Write-Host "  STATUS: '$authUsersShort' is in the group (good)" -ForegroundColor Green
     }
     
-    # ---------------------------------------------------------------
-    # CHECK 4: CredSSP / Encryption Oracle Remediation
-    # ---------------------------------------------------------------
+    # CHECK 4: CredSSP (optional)
     Write-Host ""
-    Write-Host "  CHECK 4: CredSSP Encryption Oracle policy" -ForegroundColor Cyan
+    Write-Host "  CHECK 4: CredSSP Encryption Oracle (optional)" -ForegroundColor Cyan
     Write-Host ""
     
     $credSSPPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\CredSSP\Parameters"
@@ -445,66 +391,44 @@ function Show-AzureADDiagnostics {
     
     if (-not $credSSP -or $credSSP.AllowEncryptionOracle -ne 2) {
         $issuesFound++
-        Write-Host "  STATUS: CredSSP not set to 'Vulnerable' mode" -ForegroundColor Yellow
-        Write-Host ""
-        Write-Host "  PROBLEM:" -ForegroundColor Yellow
-        Write-Host "  Some Azure AD + RDP combinations fail because of CredSSP"
-        Write-Host "  encryption negotiation mismatches between the browser client"
-        Write-Host "  and Windows. Setting this to 'Vulnerable' allows fallback."
-        Write-Host ""
-        Write-Host "  FIX: Set CredSSP AllowEncryptionOracle = 2 (Vulnerable)" -ForegroundColor Yellow
-        Write-Host ""
-        Write-Host "  WHAT THIS CHANGES:" -ForegroundColor White
-        Write-Host "  - Registry: ...\CredSSP\Parameters\AllowEncryptionOracle = 2"
-        Write-Host "  - Allows older CredSSP protocol versions as fallback"
-        Write-Host ""
-        Write-Host "  RISK ASSESSMENT:" -ForegroundColor White
-        Write-Host "  - MEDIUM-LOW RISK. This is a workaround for CVE-2018-0886."
-        Write-Host "  - The vulnerability requires a man-in-the-middle position"
-        Write-Host "    on the network between client and server."
-        Write-Host "  - In your setup, the connection goes through Cloudflare's"
-        Write-Host "    encrypted tunnel, making MITM practically impossible."
-        Write-Host "  - Microsoft patched this in 2018; modern Windows is safe."
+        Write-Host "  STATUS: CredSSP not set to fallback mode" -ForegroundColor Yellow
         Write-Host ""
         Write-Host "  NOTE: This fix is OPTIONAL. Try without it first." -ForegroundColor Gray
-        Write-Host "        Only apply if RDP still fails after fixes 1-3." -ForegroundColor Gray
+        Write-Host "  Only apply if RDP still fails after fixes 1-3." -ForegroundColor Gray
+        Write-Host ""
+        Write-Host "  FIX: Set CredSSP AllowEncryptionOracle = 2" -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "  RISK: MEDIUM-LOW - Allows older CredSSP as fallback." -ForegroundColor White
+        Write-Host "  Connection goes through Cloudflare's encrypted tunnel." -ForegroundColor White
         Write-Host ""
         
-        $fix4 = Read-Host "  Apply fix? Set CredSSP to Vulnerable mode [Y/N]"
-        if ($fix4 -eq "Y" -or $fix4 -eq "y") {
+        $fix = Read-Host "  Apply fix? [Y/N]"
+        if ($fix -match '^[yY]') {
             try {
                 $parentPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\CredSSP"
-                if (-not (Test-Path $parentPath)) {
-                    New-Item -Path $parentPath -Force | Out-Null
-                }
-                if (-not (Test-Path $credSSPPath)) {
-                    New-Item -Path $credSSPPath -Force | Out-Null
-                }
+                if (-not (Test-Path $parentPath)) { New-Item -Path $parentPath -Force | Out-Null }
+                if (-not (Test-Path $credSSPPath)) { New-Item -Path $credSSPPath -Force | Out-Null }
                 Set-ItemProperty -Path $credSSPPath -Name "AllowEncryptionOracle" -Value 2 -Type DWord -Force
-                Write-Host "  [OK] CredSSP set to Vulnerable mode." -ForegroundColor Green
+                Write-Host "  [OK] CredSSP set to fallback mode." -ForegroundColor Green
                 $issuesFixed++
             }
-            catch {
-                Write-Host "  [X] Failed: $_" -ForegroundColor Red
-            }
+            catch { Write-Host "  [X] Failed: $_" -ForegroundColor Red }
         }
         else {
-            Write-Host "  [--] Skipped (recommended to try without this first)." -ForegroundColor Gray
+            Write-Host "  [--] Skipped (recommended to try without)." -ForegroundColor Gray
         }
     }
     else {
-        Write-Host "  STATUS: CredSSP already set to Vulnerable mode (OK)" -ForegroundColor Green
+        Write-Host "  STATUS: CredSSP already configured (good)" -ForegroundColor Green
     }
     
-    # ---------------------------------------------------------------
     # SUMMARY
-    # ---------------------------------------------------------------
     Write-Host ""
     Write-Host "-----------------------------------------------------------" -ForegroundColor DarkGray
     Write-Host ""
     
     if ($issuesFound -eq 0) {
-        Write-Host "  All Azure AD checks passed! No issues found." -ForegroundColor Green
+        Write-Host "  All Azure AD checks passed!" -ForegroundColor Green
         $Results["Azure AD Check"] = "OK"
     }
     elseif ($issuesFixed -eq $issuesFound) {
@@ -513,30 +437,374 @@ function Show-AzureADDiagnostics {
     }
     elseif ($issuesFixed -gt 0) {
         Write-Host "  Fixed $issuesFixed of $issuesFound issue(s)." -ForegroundColor Yellow
-        Write-Host "  Some issues remain - browser RDP may not work." -ForegroundColor Yellow
         $Results["Azure AD Check"] = "OK"
     }
     else {
         Write-Host "  $issuesFound issue(s) found but none fixed." -ForegroundColor Red
-        Write-Host "  Browser RDP will likely NOT work with Azure AD." -ForegroundColor Red
         $Results["Azure AD Check"] = "FAIL"
     }
     
     Write-Host ""
     Write-Host "  LOGIN TIP FOR AZURE AD:" -ForegroundColor Cyan
-    Write-Host "  When connecting via browser RDP, use this format:" -ForegroundColor White
+    Write-Host "  Username: AzureAD\YourName  (run 'whoami' to check)" -ForegroundColor White
+    Write-Host "  Password: Microsoft account password (NOT PIN)" -ForegroundColor White
     Write-Host ""
-    Write-Host "    Username: AzureAD\YourName" -ForegroundColor Green
-    Write-Host "    (e.g. AzureAD\ElinaPaasovaara)" -ForegroundColor Gray
+}
+
+# ===================================================================
+# FUNCTIONS - POWER MANAGEMENT
+# ===================================================================
+
+function Test-ModernStandby {
+    try {
+        $lines = (powercfg /a) 2>$null
+        foreach ($line in $lines) {
+            if ($line -match '(?i)\b(not available|not been|inte tillg)') { break }
+            if ($line -match '(?i)S0') { return $true }
+        }
+        return $false
+    } catch { return $false }
+}
+
+function Test-IsLaptop {
+    try {
+        $chassis = (Get-CimInstance -ClassName Win32_SystemEnclosure -ErrorAction Stop).ChassisTypes
+        $laptopTypes = 8, 9, 10, 11, 12, 14, 18, 21, 30, 31, 32
+        foreach ($c in $chassis) { if ($laptopTypes -contains $c) { return $true } }
+        return [bool](Get-CimInstance -ClassName Win32_Battery -ErrorAction SilentlyContinue)
+    } catch { return $false }
+}
+
+function Invoke-PowerCfg {
+    param([string[]]$Arguments)
+    $null = & powercfg @Arguments 2>&1
+    return ($LASTEXITCODE -eq 0)
+}
+
+function Set-SleepTimeouts {
+    param([int]$StandbyAC, [int]$StandbyDC, [int]$HibernateAC, [int]$HibernateDC)
+    Invoke-PowerCfg @('-change', '-standby-timeout-ac',   "$StandbyAC")   | Out-Null
+    Invoke-PowerCfg @('-change', '-standby-timeout-dc',   "$StandbyDC")   | Out-Null
+    Invoke-PowerCfg @('-change', '-hibernate-timeout-ac', "$HibernateAC") | Out-Null
+    Invoke-PowerCfg @('-change', '-hibernate-timeout-dc', "$HibernateDC") | Out-Null
+}
+
+function Set-LidAction {
+    param([int]$AC, [int]$DC)
+    Invoke-PowerCfg @('-setacvalueindex', 'SCHEME_CURRENT', $SUB_BUTTONS, $LID_ACTION, "$AC") | Out-Null
+    Invoke-PowerCfg @('-setdcvalueindex', 'SCHEME_CURRENT', $SUB_BUTTONS, $LID_ACTION, "$DC") | Out-Null
+}
+
+function Set-StandbyNetwork {
+    param([int]$AC, [int]$DC)
+    Invoke-PowerCfg @('/setacvalueindex', 'scheme_current', 'sub_none', $CONN_IN_STANDBY, "$AC") | Out-Null
+    Invoke-PowerCfg @('/setdcvalueindex', 'scheme_current', 'sub_none', $CONN_IN_STANDBY, "$DC") | Out-Null
+}
+
+function Disable-NicPowerSaving {
+    try {
+        Get-NetAdapter -Physical -ErrorAction Stop | ForEach-Object {
+            Disable-NetAdapterPowerManagement -Name $_.Name -NoRestart -ErrorAction SilentlyContinue
+        }
+        Get-CimInstance -ClassName MSPower_DeviceEnable -Namespace root\wmi -ErrorAction SilentlyContinue |
+            ForEach-Object {
+                $iid = $_.InstanceName
+                $isNic = Get-PnpDevice -Class Net -ErrorAction SilentlyContinue |
+                         Where-Object { $iid -like "$($_.InstanceId)*" }
+                if ($isNic) {
+                    $_.Enable = $false
+                    Set-CimInstance -InputObject $_ -ErrorAction SilentlyContinue
+                }
+            }
+        return $true
+    } catch { return $false }
+}
+
+function Enable-NicPowerSaving {
+    try {
+        Get-NetAdapter -Physical -ErrorAction Stop | ForEach-Object {
+            Enable-NetAdapterPowerManagement -Name $_.Name -NoRestart -ErrorAction SilentlyContinue
+        }
+        Get-CimInstance -ClassName MSPower_DeviceEnable -Namespace root\wmi -ErrorAction SilentlyContinue |
+            ForEach-Object {
+                $iid = $_.InstanceName
+                $isNic = Get-PnpDevice -Class Net -ErrorAction SilentlyContinue |
+                         Where-Object { $iid -like "$($_.InstanceId)*" }
+                if ($isNic) {
+                    $_.Enable = $true
+                    Set-CimInstance -InputObject $_ -ErrorAction SilentlyContinue
+                }
+            }
+        return $true
+    } catch { return $false }
+}
+
+function Hide-ShutdownButton {
+    # NOTE: HKCU - only affects the current user, not system-wide
+    if (-not (Test-Path $REG_EXPLORER_POL)) {
+        New-Item -Path $REG_EXPLORER_POL -Force | Out-Null
+    }
+    Set-ItemProperty -Path $REG_EXPLORER_POL -Name 'NoClose' -Value 1 -Type DWord -Force
+}
+
+function Show-ShutdownButton {
+    if (Test-Path $REG_EXPLORER_POL) {
+        Remove-ItemProperty -Path $REG_EXPLORER_POL -Name 'NoClose' -ErrorAction SilentlyContinue
+    }
+}
+
+function Save-PowerPreset {
+    param([string]$Name)
+    $dir = Split-Path $PM_MARKER_FILE -Parent
+    if (-not (Test-Path $dir)) { New-Item -Path $dir -ItemType Directory -Force | Out-Null }
+    Set-Content -Path $PM_MARKER_FILE -Value $Name -Force
+}
+
+function Get-PowerPreset {
+    if (Test-Path $PM_MARKER_FILE) { return (Get-Content $PM_MARKER_FILE -First 1).Trim() }
+    return $null
+}
+
+function Apply-PowerScheme {
+    Invoke-PowerCfg @('-SetActive', 'SCHEME_CURRENT') | Out-Null
+}
+
+function Set-PresetMax {
+    Write-Host "  -> Disabling sleep/hibernation (AC + battery)..."
+    Set-SleepTimeouts -StandbyAC 0 -StandbyDC 0 -HibernateAC 0 -HibernateDC 0
+    Write-Host "  -> Lid close: do nothing (AC + battery)..."
+    Set-LidAction -AC 0 -DC 0
+    Write-Host "  -> Network always on in standby (AC + battery)..."
+    Set-StandbyNetwork -AC 1 -DC 1
+    Write-Host "  -> Disabling NIC power saving..."
+    Disable-NicPowerSaving | Out-Null
+    Write-Host "  -> Hiding shutdown button in Start menu (current user only)..."
+    Hide-ShutdownButton
+    Apply-PowerScheme
+    Save-PowerPreset 'Max'
+}
+
+function Set-PresetHigh {
+    Write-Host "  -> Disabling sleep/hibernation (AC + battery)..."
+    Set-SleepTimeouts -StandbyAC 0 -StandbyDC 0 -HibernateAC 0 -HibernateDC 0
+    Write-Host "  -> Lid close: do nothing (AC + battery)..."
+    Set-LidAction -AC 0 -DC 0
+    Write-Host "  -> Network always on in standby (AC + battery)..."
+    Set-StandbyNetwork -AC 1 -DC 1
+    Write-Host "  -> Disabling NIC power saving..."
+    Disable-NicPowerSaving | Out-Null
+    Write-Host "  -> Ensuring shutdown button is visible..."
+    Show-ShutdownButton
+    Apply-PowerScheme
+    Save-PowerPreset 'High'
+}
+
+function Set-PresetBalanced {
+    Write-Host "  -> Never sleep on AC, 15 min on battery..."
+    Set-SleepTimeouts -StandbyAC 0 -StandbyDC 15 -HibernateAC 0 -HibernateDC 0
+    Write-Host "  -> Lid close: do nothing on AC, sleep on battery..."
+    Set-LidAction -AC 0 -DC 1
+    Write-Host "  -> Network in standby: on (AC), off (battery)..."
+    Set-StandbyNetwork -AC 1 -DC 0
+    Write-Host "  -> Disabling NIC power saving..."
+    Disable-NicPowerSaving | Out-Null
+    Write-Host "  -> Ensuring shutdown button is visible..."
+    Show-ShutdownButton
+    Apply-PowerScheme
+    Save-PowerPreset 'Balanced'
+}
+
+function Set-PresetLowPlus {
+    Write-Host "  -> Leaving sleep/lid settings unchanged..."
+    Write-Host "  -> Network always on in standby (AC + battery)..."
+    Set-StandbyNetwork -AC 1 -DC 1
+    Write-Host "  -> Disabling NIC power saving..."
+    Disable-NicPowerSaving | Out-Null
+    Write-Host "  -> Ensuring shutdown button is visible..."
+    Show-ShutdownButton
+    Apply-PowerScheme
+    Save-PowerPreset 'LowPlus'
+}
+
+function Set-PresetLow {
+    Write-Host "  -> Restoring Windows default power schemes..."
+    Invoke-PowerCfg @('-restoredefaultschemes') | Out-Null
+    Write-Host "  -> Restoring NIC power saving..."
+    Enable-NicPowerSaving | Out-Null
+    Write-Host "  -> Ensuring shutdown button is visible..."
+    Show-ShutdownButton
+    Save-PowerPreset 'Low'
+}
+
+function Show-PowerStatus {
+    $modernStandby = Test-ModernStandby
+    $isLaptop = Test-IsLaptop
+    $marker = Get-PowerPreset
+    
     Write-Host ""
-    Write-Host "    OR: your-email@domain.com" -ForegroundColor Green
-    Write-Host "    (e.g. elina@baik.nu)" -ForegroundColor Gray
+    Write-Host "  Current power settings:" -ForegroundColor White
+    Write-Host "    Device type    : $(if ($isLaptop) { 'Laptop' } else { 'Desktop' })"
+    Write-Host "    Modern Standby : $(if ($modernStandby) { 'Supported' } else { 'Not supported (classic S3)' })"
+    Write-Host "    Active preset  : $(if ($marker) { $marker } else { 'None (Windows default)' })"
+    
+    try {
+        $sleepAC = (powercfg /q SCHEME_CURRENT SUB_SLEEP STANDBYIDLE | Select-String 'Current AC Power Setting Index:\s+0x([0-9a-f]+)').Matches
+        if ($sleepAC.Count -gt 0) {
+            $secs = [Convert]::ToInt32($sleepAC[0].Groups[1].Value, 16)
+            $txt = if ($secs -eq 0) { 'Never' } else { "$([math]::Round($secs/60)) min" }
+            Write-Host "    Sleep (AC)     : $txt"
+        }
+        $sleepDC = (powercfg /q SCHEME_CURRENT SUB_SLEEP STANDBYIDLE | Select-String 'Current DC Power Setting Index:\s+0x([0-9a-f]+)').Matches
+        if ($sleepDC.Count -gt 0) {
+            $secs = [Convert]::ToInt32($sleepDC[0].Groups[1].Value, 16)
+            $txt = if ($secs -eq 0) { 'Never' } else { "$([math]::Round($secs/60)) min" }
+            Write-Host "    Sleep (battery): $txt"
+        }
+    } catch { }
     Write-Host ""
-    Write-Host "    Password: Your Microsoft account password" -ForegroundColor Green
-    Write-Host "    (NOT your PIN - PINs don't work over RDP)" -ForegroundColor Gray
+}
+
+function Show-PowerManagement {
+    <#
+    .SYNOPSIS
+        Interactive power management menu.
+        Can be called standalone or as part of install flow.
+        Returns the chosen preset name or $null if skipped.
+    #>
+    param(
+        [switch]$SetupStep  # If true, show compact version with skip option
+    )
+    
+    $modernStandby = Test-ModernStandby
+    $isLaptop = Test-IsLaptop
+    
     Write-Host ""
-    Write-Host "  To find your exact username, run 'whoami' in CMD." -ForegroundColor White
+    Write-Host "===========================================================" -ForegroundColor Cyan
+    Write-Host "  POWER MANAGEMENT - RDP Availability" -ForegroundColor Cyan
+    Write-Host "===========================================================" -ForegroundColor Cyan
+    
+    if (-not $SetupStep) { Show-PowerStatus }
+    
     Write-Host ""
+    Write-Host "  For reliable RDP access, the PC should stay awake and" -ForegroundColor White
+    Write-Host "  keep its network connection active. Choose a preset:" -ForegroundColor White
+    Write-Host ""
+    Write-Host "  [1] MAX" -ForegroundColor White
+    Write-Host "      Always awake + connected (AC and battery)."
+    Write-Host "      Lid does nothing. Shutdown button hidden (this user)."
+    Write-Host ""
+    Write-Host "  [2] High" -ForegroundColor White
+    Write-Host "      Always awake + connected (AC and battery)."
+    Write-Host "      Lid does nothing. Uses more battery."
+    Write-Host ""
+    Write-Host "  [3] Balanced (RECOMMENDED)" -ForegroundColor Green
+    Write-Host "      Always awake + connected WHEN CHARGER IS PLUGGED IN."
+    Write-Host "      Normal power saving on battery."
+    Write-Host ""
+    
+    if ($modernStandby) {
+        Write-Host "  [4] Low+" -ForegroundColor White
+        Write-Host "      Sleeps normally, but network stays alive in standby."
+        Write-Host "      Requires Modern Standby (S0) - supported on this PC."
+    }
+    else {
+        Write-Host "  [4] Low+ (NOT AVAILABLE ON THIS PC)" -ForegroundColor DarkGray
+        Write-Host "      Requires Modern Standby (S0). This PC uses classic S3." -ForegroundColor DarkGray
+    }
+    Write-Host ""
+    Write-Host "  [5] Low (reset to Windows defaults)" -ForegroundColor White
+    Write-Host "      Restores all power settings to factory defaults."
+    Write-Host "      PC may sleep and lose network - you must wake it manually."
+    Write-Host ""
+    
+    if ($SetupStep) {
+        Write-Host "  [Enter] Skip - make no changes" -ForegroundColor Gray
+        Write-Host ""
+    }
+    else {
+        Write-Host "  [Q] Back - make no changes" -ForegroundColor Gray
+        Write-Host ""
+    }
+    
+    do {
+        if ($SetupStep) {
+            $choice = Read-Host "  Choose [1-5, or Enter to skip]"
+        }
+        else {
+            $choice = Read-Host "  Choose [1-5 or Q]"
+        }
+        
+        # Handle skip/quit
+        if ($SetupStep -and [string]::IsNullOrWhiteSpace($choice)) {
+            Write-Host "  Skipped - no power changes made." -ForegroundColor Gray
+            return $null
+        }
+        if (-not $SetupStep -and $choice -match '^[qQ]$') {
+            Write-Host "  No changes made." -ForegroundColor Gray
+            return $null
+        }
+        
+        $valid = $choice -match '^[1-5]$'
+        if (-not $valid) {
+            Write-Host "  Invalid choice. Enter 1-5$(if ($SetupStep) { ' or press Enter to skip' } else { ' or Q' })." -ForegroundColor Yellow
+        }
+        if ($choice -eq '4' -and -not $modernStandby) {
+            Write-Host ""
+            Write-Host "  This PC does NOT support Modern Standby (S0)." -ForegroundColor Red
+            Write-Host "  In classic S3 sleep, the NIC powers off completely." -ForegroundColor Yellow
+            Write-Host "  Choose Balanced [3] or higher instead." -ForegroundColor Yellow
+            Write-Host ""
+            $valid = $false
+        }
+    } until ($valid)
+    
+    $names = @{ '1' = 'MAX'; '2' = 'High'; '3' = 'Balanced'; '4' = 'Low+'; '5' = 'Low (reset)' }
+    
+    Write-Host ""
+    Write-Host "  Applying preset: $($names[$choice])" -ForegroundColor Cyan
+    Write-Host ""
+    
+    switch ($choice) {
+        '1' { Set-PresetMax }
+        '2' { Set-PresetHigh }
+        '3' { Set-PresetBalanced }
+        '4' { Set-PresetLowPlus }
+        '5' { Set-PresetLow }
+    }
+    
+    Write-Host ""
+    Write-Host "  [OK] Power preset '$($names[$choice])' applied." -ForegroundColor Green
+    if ($choice -eq '1') {
+        Write-Host "  NOTE: Log out and back in for shutdown button to hide." -ForegroundColor Yellow
+    }
+    Write-Host ""
+    
+    return $names[$choice]
+}
+
+function Reset-PowerToDefaults {
+    <#
+    .SYNOPSIS
+        Resets power settings during uninstall. Asks user first.
+    #>
+    $marker = Get-PowerPreset
+    if (-not $marker -or $marker -eq 'Low') {
+        return  # Nothing to reset
+    }
+    
+    Write-Host ""
+    Write-Host "  Power management preset '$marker' is currently active." -ForegroundColor Yellow
+    Write-Host ""
+    $reset = Read-Host "  Reset power settings to Windows defaults? [Y/N]"
+    if ($reset -match '^[yY]') {
+        Write-Host ""
+        Set-PresetLow
+        Write-Host ""
+        Write-Host "  [OK] Power settings restored to defaults." -ForegroundColor Green
+    }
+    else {
+        Write-Host "  Power settings left unchanged." -ForegroundColor Gray
+    }
 }
 
 # ===================================================================
@@ -546,12 +814,12 @@ function Show-AzureADDiagnostics {
 Show-Banner
 
 $mainChoice = Read-Host "  Press [I] to install/manage, [Q] for FAQ"
-if ($mainChoice -eq "Q") {
+if ($mainChoice -match '^[qQ]$') {
     Show-FAQ
     $faqChoice = Read-Host "  Press [I] to install, [X] to exit"
     if ($faqChoice -ne "I") { exit 0 }
 }
-elseif ($mainChoice -ne "I") {
+elseif ($mainChoice -notmatch '^[iI]$') {
     Write-Host "  Invalid choice." -ForegroundColor Red
     pause; exit 1
 }
@@ -591,15 +859,15 @@ if ($existingSvc) {
     Write-Host ""
     Write-Host "  [R] Reinstall / Change address"
     Write-Host "  [U] Uninstall completely"
-    Write-Host "  [D] Run diagnostics only (Azure AD check)"
+    Write-Host "  [D] Run diagnostics (Azure AD check)"
+    Write-Host "  [P] Power management settings"
     Write-Host "  [Q] Quit - do nothing"
     Write-Host ""
-    $existChoice = Read-Host "  Choose [R/U/D/Q]"
+    $existChoice = Read-Host "  Choose [R/U/D/P/Q]"
     
-    if ($existChoice -eq "Q") { Write-Host "  Cancelled."; pause; exit 0 }
+    if ($existChoice -match '^[qQ]$') { Write-Host "  Cancelled."; pause; exit 0 }
     
-    if ($existChoice -eq "D" -or $existChoice -eq "d") {
-        # Run Azure AD diagnostics only
+    if ($existChoice -match '^[dD]$') {
         $azureInfo = Test-AzureADJoined
         if ($azureInfo.IsAzureADJoined) {
             Show-AzureADDiagnostics -AzureInfo $azureInfo
@@ -618,18 +886,41 @@ if ($existingSvc) {
         pause; exit 0
     }
     
-    if ($existChoice -eq "U" -or $existChoice -eq "R") {
+    if ($existChoice -match '^[pP]$') {
+        Show-PowerManagement
+        pause; exit 0
+    }
+    
+    if ($existChoice -match '^[uU]$') {
+        Write-Host ""
+        Write-Host "  Uninstalling Browser-RDP tunnel..." -ForegroundColor Yellow
+        
+        # Ask about power reset before removing service
+        Reset-PowerToDefaults
+        
+        Write-Host ""
+        Write-Host "  Removing service and files..." -ForegroundColor Yellow
+        Stop-Service -Name $SvcName -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+        sc.exe delete $SvcName | Out-Null
+        Start-Sleep -Seconds 2
+        if (Test-Path $InstallDir) { Remove-Item -Path $InstallDir -Recurse -Force -ErrorAction SilentlyContinue }
+        Write-Host "  [OK] Uninstalled." -ForegroundColor Green
+        pause; exit 0
+    }
+    
+    if ($existChoice -match '^[rR]$') {
         Write-Host "  Removing existing installation..." -ForegroundColor Yellow
         Stop-Service -Name $SvcName -Force -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 2
         sc.exe delete $SvcName | Out-Null
         Start-Sleep -Seconds 2
         if (Test-Path $InstallDir) { Remove-Item -Path $InstallDir -Recurse -Force -ErrorAction SilentlyContinue }
-        Write-Host "  [OK] Removed." -ForegroundColor Green
-        if ($existChoice -eq "U") { pause; exit 0 }
+        Write-Host "  [OK] Removed. Proceeding with reinstall..." -ForegroundColor Green
     }
     else {
-        Write-Host "  Invalid choice."; pause; exit 1
+        Write-Host "  Invalid choice." -ForegroundColor Red
+        pause; exit 1
     }
 }
 else {
@@ -664,8 +955,8 @@ if ($slots.Count -gt 0) {
     Write-Host ""
     $slotChoice = Read-Host "  Choose [1-$($slots.Count), C, or Q]"
     
-    if ($slotChoice -eq "Q") { exit 0 }
-    if ($slotChoice -eq "C") {
+    if ($slotChoice -match '^[qQ]$') { exit 0 }
+    if ($slotChoice -match '^[cC]$') {
         # Fall through to manual input below
     }
     elseif ($slotChoice -match "^\d+$") {
@@ -709,11 +1000,13 @@ Write-Host ""
 Write-Host "[1/5] Enabling Remote Desktop..." -ForegroundColor Cyan
 try {
     Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0 -Force
-    # NLA will be handled by Azure AD check - set to enabled by default for non-Azure AD
     Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "UserAuthentication" -Value 1 -Force
-    # Enable firewall rules for RDP (try both English and Swedish group names)
+    # Enable firewall rules (try both English and Swedish group names)
     Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
     Enable-NetFirewallRule -DisplayGroup "Fjärrskrivbord" -ErrorAction SilentlyContinue
+    # Also try by direct rule name as fallback
+    Get-NetFirewallRule | Where-Object { $_.DisplayName -match "Remote Desktop|Fjärrskrivbord" } |
+        Enable-NetFirewallRule -ErrorAction SilentlyContinue
     Write-Host "  [OK] Remote Desktop enabled (NLA active)." -ForegroundColor Green
     $Results["Remote Desktop"] = "OK"
 }
@@ -721,7 +1014,7 @@ catch {
     Write-Host "  [X] Failed to enable RDP: $_" -ForegroundColor Red
 }
 
-# --- AZURE AD CHECK (after RDP enabled, before download) ---
+# --- AZURE AD CHECK ---
 Write-Host ""
 Write-Host "[Azure AD] Checking device join status..." -ForegroundColor Cyan
 $azureInfo = Test-AzureADJoined
@@ -758,13 +1051,10 @@ catch {
 Write-Host ""
 Write-Host "[3/5] Installing as background service ($SvcName)..." -ForegroundColor Cyan
 try {
-    # Save token to file
     Set-Content -Path $TokenFile -Value $ChosenToken -NoNewline -Force
     
-    # Create service with NSSM-style direct approach
     $binPath = "`"$ExePath`" tunnel run --token $ChosenToken"
     
-    # Use New-Service (PowerShell native - no escaping issues)
     New-Service -Name $SvcName `
         -BinaryPathName $binPath `
         -DisplayName $SvcDisplay `
@@ -786,7 +1076,6 @@ catch {
 Write-Host ""
 Write-Host "[4/5] Configuring watchdog (auto-recovery)..." -ForegroundColor Cyan
 try {
-    # Recovery: restart after 10s, 10s, 30s - reset counter after 24h
     sc.exe failure $SvcName reset= 86400 actions= restart/10000/restart/10000/restart/30000 | Out-Null
     sc.exe failureflag $SvcName 1 | Out-Null
     Write-Host "  [OK] Watchdog configured (auto-restart on crash, sleep, logout)." -ForegroundColor Green
@@ -837,6 +1126,26 @@ if ($Results["Service Start"] -eq "OK") {
 }
 else {
     Write-Host "  [!] Skipped." -ForegroundColor Yellow
+}
+
+# --- POWER MANAGEMENT (post-install step) ---
+Write-Host ""
+Write-Host "-----------------------------------------------------------" -ForegroundColor DarkGray
+Write-Host ""
+Write-Host "  OPTIONAL: Configure power management to keep this PC" -ForegroundColor Cyan
+Write-Host "  awake and reachable for RDP connections." -ForegroundColor Cyan
+Write-Host ""
+
+$pmChoice = Read-Host "  Configure power settings now? [Y/N]"
+if ($pmChoice -match '^[yY]') {
+    $pmResult = Show-PowerManagement -SetupStep
+    if ($pmResult) {
+        $Results["Power Management"] = "OK"
+    }
+}
+else {
+    Write-Host "  Skipped. You can configure this later by running the script again." -ForegroundColor Gray
+    Write-Host "  (Choose [P] from the manage menu)" -ForegroundColor Gray
 }
 
 # --- CHECKLIST ---
