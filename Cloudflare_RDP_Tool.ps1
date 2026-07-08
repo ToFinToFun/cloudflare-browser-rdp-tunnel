@@ -328,8 +328,11 @@ try {
         -BinaryPathName $binPath `
         -DisplayName $SvcDisplay `
         -Description "Cloudflare Browser-RDP Tunnel - browser-based remote desktop via Zero Trust" `
-        -StartupType AutomaticDelayedStart `
+        -StartupType Automatic `
         -ErrorAction Stop | Out-Null
+    
+    # Set delayed auto-start via registry (compatible with all PS versions)
+    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$SvcName" -Name "DelayedAutostart" -Value 1 -Type DWord -Force
     
     Write-Host "  [OK] Service installed as '$SvcName'." -ForegroundColor Green
     $Results["Service Install"] = "OK"
