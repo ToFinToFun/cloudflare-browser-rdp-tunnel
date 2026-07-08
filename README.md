@@ -2,7 +2,7 @@
 
 A lightweight, zero-client solution to access your Windows PC via Remote Desktop directly from any web browser. 
 
-This tool installs `cloudflared` as a hidden Windows background service, enabling secure, browser-based RDP using Cloudflare Zero Trust. No VPN, no WARP client, and no RDP software is required on the connecting device.
+This tool installs `cloudflared` as a hidden Windows background service (`cloudflared-rdp`), enabling secure, browser-based RDP using Cloudflare Zero Trust. No VPN, no WARP client, and no RDP software is required on the connecting device.
 
 ## Features
 
@@ -12,6 +12,8 @@ This tool installs `cloudflared` as a hidden Windows background service, enablin
 - **Network Agnostic:** Works on any network (WiFi, ethernet, mobile hotspot) without port forwarding.
 - **Invisible & Resilient:** Runs as a hidden Windows service. Survives sleep, hibernation, lock screens, and logouts.
 - **Auto-Recovery:** Built-in watchdog restarts the service automatically if it crashes.
+- **Safe:** Installs as a separate service (`cloudflared-rdp`) — will **not** interfere with any existing `cloudflared` installations (e.g., Seafile, other tunnels).
+- **Pre-configured Slots:** Optionally use a `slots.txt` file to offer a menu of pre-configured addresses.
 
 ## Requirements
 
@@ -58,17 +60,18 @@ Now, protect the URL so only you can access it.
 
 Now, go to the Windows PC you want to control remotely.
 
-1. Download the `Cloudflare_RDP_Tool.bat` script from this repository.
+1. Download `Cloudflare_RDP_Tool.bat` from this repository.
 2. Right-click the file and select **Run as administrator**.
 3. When prompted, enter the **Tunnel Token** you copied in Step 1.
 4. Enter the **Public Hostname** you configured (e.g., `rdp.example.com`).
 5. The script will automatically:
-   - Verify Windows compatibility
+   - Verify Windows compatibility (aborts on Windows Home)
    - Enable Remote Desktop and Network Level Authentication (NLA)
    - Download the latest `cloudflared` binary
-   - Install it as a hidden service
+   - Install it as a hidden service (`cloudflared-rdp`)
    - Configure the watchdog for auto-recovery
    - Start the service and verify the connection
+   - Show a checklist of all steps (OK/FAIL)
 
 ## Step 4: Connect!
 
@@ -81,12 +84,65 @@ Done!
 
 ---
 
+## Pre-configured Slots (Optional)
+
+If you manage multiple PCs, you can create a `slots.txt` file in the same folder as the script. This gives users a numbered menu to choose from instead of entering tokens manually.
+
+**Format:** One entry per line: `hostname|token`
+
+```
+rdp1.example.com|eyJhIjoiYjkyNWM5NTkw...
+rdp2.example.com|eyJhIjoiYzEyM2Q0NTY3...
+office-pc.example.com|eyJhIjoiZGVmMTIz...
+```
+
+When `slots.txt` is present, the script shows:
+```
+Choose an address for this PC:
+
+  [1] rdp1.example.com
+  [2] rdp2.example.com
+  [3] office-pc.example.com
+
+  [C] Custom (enter your own token and address)
+  [Q] Quit
+```
+
+When `slots.txt` is absent or empty, the script goes directly to manual token input.
+
+See `slots.txt.example` for a template.
+
+---
+
 ## Uninstallation
 
 If you ever want to remove the tunnel from your PC:
 1. Run `Cloudflare_RDP_Tool.bat` as administrator again.
 2. The script will detect the existing installation.
 3. Press `U` to uninstall completely.
+
+Other `cloudflared` services (Seafile, etc.) are never touched.
+
+---
+
+## How It Works
+
+```
+[Your Phone/Laptop]          [Cloudflare Edge]          [Target PC]
+     Browser          --->   Zero Trust Access   <---   cloudflared-rdp
+  (any device)               (OTP/SSO auth)             (outbound tunnel)
+                                    |
+                             Browser RDP Renderer
+                             (IronRDP in browser)
+```
+
+1. The target PC runs `cloudflared-rdp` as a hidden service.
+2. It maintains an **outbound** connection to Cloudflare (no open ports).
+3. When you visit the URL, Cloudflare authenticates you (OTP/SSO).
+4. Cloudflare renders the RDP session directly in your browser.
+5. The PC's physical screen stays locked — nothing is visible locally.
+
+---
 
 ## Credits
 

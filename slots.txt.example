@@ -1,0 +1,9 @@
+## slots.txt - Pre-configured tunnel addresses
+## Place this file next to Cloudflare_RDP_Tool.bat
+## Format: hostname|token (one per line)
+## Lines starting with ## are ignored by the script
+##
+## Example:
+## rdp1.example.com|eyJhIjoiYjkyNWM5NTkwZGQ0...
+## rdp2.example.com|eyJhIjoiYzEyM2Q0NTY3ODkw...
+## office-pc.example.com|eyJhIjoiZGVmMTIzNDU2...

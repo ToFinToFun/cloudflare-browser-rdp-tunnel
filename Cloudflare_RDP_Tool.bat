@@ -7,9 +7,19 @@ setlocal EnableDelayedExpansion
 :: Cloudflare Browser-RDP Tunnel by JPaasovaara
 :: Makes this Windows PC reachable via browser-based RDP 
 :: using Cloudflare Zero Trust Tunnels.
+:: This script installs as 'cloudflared-rdp' service and will
+:: NOT interfere with any existing cloudflared installation.
 :: MIT License - github.com/ToFinToFun/cloudflare-browser-rdp-tunnel
 :: ============================================================
 
+:: Service name (separate from any existing cloudflared service)
+set "SVC_NAME=cloudflared-rdp"
+set "INSTALL_DIR=C:\Program Files\cloudflared-rdp"
+set "SCRIPT_DIR=%~dp0"
+set "SLOTS_FILE=%SCRIPT_DIR%slots.txt"
+set "SLOT_COUNT=0"
+
+:: Result tracking
 set "CHK_ADMIN=FAIL"
 set "CHK_WINVER=FAIL"
 set "CHK_RDP=FAIL"
@@ -18,7 +28,17 @@ set "CHK_INSTALL=FAIL"
 set "CHK_WATCHDOG=FAIL"
 set "CHK_SERVICE=FAIL"
 set "CHK_CONNECT=FAIL"
-set "INSTALL_DIR=C:\Program Files\cloudflared"
+set "CHOSEN_NAME="
+set "CHOSEN_TOKEN="
+
+:: Load slots from slots.txt if it exists
+if exist "!SLOTS_FILE!" (
+    for /f "usebackq tokens=1,2 delims=|" %%a in ("!SLOTS_FILE!") do (
+        set /a SLOT_COUNT+=1
+        set "SLOT_NAME_!SLOT_COUNT!=%%a"
+        set "SLOT_TOKEN_!SLOT_COUNT!=%%b"
+    )
+)
 
 echo.
 echo ===========================================================
@@ -29,6 +49,10 @@ echo.
 echo   This tool makes your PC accessible via Remote Desktop
 echo   directly in a web browser - from anywhere in the world.
 echo   No VPN or client software needed on the connecting device.
+echo.
+echo   NOTE: This installs as a SEPARATE service (cloudflared-rdp)
+echo   and will NOT affect any existing cloudflared installations
+echo   (e.g. Seafile, other tunnels).
 echo.
 echo   Press [I] to install/manage, or [Q] for FAQ and info.
 echo.
@@ -51,13 +75,17 @@ echo ===========================================================
 echo.
 echo   HOW DOES IT WORK?
 echo   This script installs 'cloudflared' as a hidden Windows
-echo   service. It creates an outbound tunnel to Cloudflare's
-echo   network, making your PC's RDP port (3389) accessible
-echo   via a secure HTTPS address in any web browser.
+echo   service called 'cloudflared-rdp'. It creates an outbound
+echo   tunnel to Cloudflare's network, making your PC's RDP port
+echo   (3389) accessible via a secure HTTPS address in any browser.
 echo.
 echo   The tunnel is OUTBOUND only - no ports are opened on
 echo   your router or firewall. The service starts at boot,
 echo   survives sleep/hibernate, and auto-restarts on crash.
+echo.
+echo   It installs in its own folder (C:\Program Files\cloudflared-rdp)
+echo   and runs as its own service - completely independent of any
+echo   other cloudflared installation on this machine.
 echo.
 echo   ---
 echo.
@@ -114,6 +142,16 @@ echo   - Access is protected by Cloudflare Access (OTP/SSO)
 echo   - RDP uses Network Level Authentication (NLA)
 echo   - The tunnel token only grants connection rights to
 echo     one specific tunnel - not your Cloudflare account
+echo.
+echo   ---
+echo.
+echo   PRE-CONFIGURED SLOTS (slots.txt):
+echo   You can place a 'slots.txt' file next to this script
+echo   to get a menu of pre-configured addresses. Format:
+echo   hostname^|token
+echo   Example:
+echo   rdp1.example.com^|eyJhIjoiYjky...
+echo   rdp2.example.com^|eyJhIjoiYzEy...
 echo.
 echo ===========================================================
 echo.
@@ -181,22 +219,25 @@ set "CHK_WINVER=OK"
 echo.
 
 :: -------------------------------------------------------
-:: DETECT: Check for existing installation
+:: DETECT: Check for existing RDP tunnel installation
+:: (Only checks OUR service 'cloudflared-rdp', not others)
 :: -------------------------------------------------------
-echo [Detect] Checking for existing Cloudflared installation...
+echo [Detect] Checking for existing Browser-RDP installation...
 
-sc query cloudflared >nul 2>&1
+sc query %SVC_NAME% >nul 2>&1
 if %errorLevel% equ 0 (
     echo.
-    echo   An existing Cloudflared tunnel is already installed on this PC.
+    echo   A Browser-RDP tunnel is already installed on this PC.
     echo.
     echo   What would you like to do?
     echo.
-    echo     [S] Switch to a different tunnel (reinstall)
-    echo     [U] Uninstall completely (remove tunnel service)
-    echo     [Q] Quit (do nothing)
+    echo     [R] Reinstall / Change address
+    echo         (removes current tunnel, then shows address menu)
+    echo     [U] Uninstall completely
+    echo         (removes the RDP tunnel service from this PC)
+    echo     [Q] Quit - do nothing
     echo.
-    set /p "EXISTING_CHOICE=   Choose [S/U/Q]: "
+    set /p "EXISTING_CHOICE=   Choose [R/U/Q]: "
 
     if /I "!EXISTING_CHOICE!"=="Q" (
         echo.
@@ -207,27 +248,28 @@ if %errorLevel% equ 0 (
 
     if /I "!EXISTING_CHOICE!"=="U" (
         echo.
-        echo   Uninstalling Cloudflared...
-        sc stop cloudflared >nul 2>&1
+        echo   Uninstalling Browser-RDP tunnel...
+        sc stop %SVC_NAME% >nul 2>&1
         timeout /t 3 /nobreak >nul
-        "!INSTALL_DIR!\cloudflared.exe" service uninstall >nul 2>&1
+        sc delete %SVC_NAME% >nul 2>&1
         timeout /t 2 /nobreak >nul
         del "!INSTALL_DIR!\cloudflared.exe" >nul 2>&1
         rmdir "!INSTALL_DIR!" >nul 2>&1
-        echo   [OK] Cloudflared uninstalled successfully.
+        echo   [OK] Browser-RDP tunnel uninstalled successfully.
+        echo       (Other cloudflared services were NOT affected)
         echo.
         pause
         exit /b 0
     )
 
-    if /I "!EXISTING_CHOICE!"=="S" (
+    if /I "!EXISTING_CHOICE!"=="R" (
         echo.
-        echo   Removing existing installation first...
-        sc stop cloudflared >nul 2>&1
+        echo   Removing current RDP tunnel...
+        sc stop %SVC_NAME% >nul 2>&1
         timeout /t 3 /nobreak >nul
-        "!INSTALL_DIR!\cloudflared.exe" service uninstall >nul 2>&1
+        sc delete %SVC_NAME% >nul 2>&1
         timeout /t 2 /nobreak >nul
-        echo   [OK] Old installation removed. Continuing with new setup...
+        echo   [OK] Old RDP tunnel removed. Continuing with new setup...
         echo.
     ) else (
         echo   Invalid choice. Aborting.
@@ -235,13 +277,54 @@ if %errorLevel% equ 0 (
         exit /b 1
     )
 ) else (
-    echo   [i] No existing installation found. Proceeding...
+    echo   [i] No existing Browser-RDP installation found. Proceeding...
     echo.
 )
 
 :: -------------------------------------------------------
-:: INPUT: Token and Address
+:: MENU: Choose address
 :: -------------------------------------------------------
+if !SLOT_COUNT! GTR 0 (
+    echo ===========================================================
+    echo   Choose an address for this PC:
+    echo ===========================================================
+    echo.
+    for /L %%i in (1,1,!SLOT_COUNT!) do (
+        echo     [%%i] !SLOT_NAME_%%i!
+    )
+    echo.
+    echo     [C] Custom (enter your own token and address)
+    echo     [Q] Quit
+    echo.
+    set /p "SLOT_CHOICE=   Choose [1-!SLOT_COUNT!, C, or Q]: "
+
+    if /I "!SLOT_CHOICE!"=="Q" (
+        echo   Cancelled.
+        pause
+        exit /b 0
+    )
+
+    if /I "!SLOT_CHOICE!"=="C" goto :manual_input
+
+    :: Validate numeric choice
+    set "VALID_CHOICE=0"
+    for /L %%n in (1,1,!SLOT_COUNT!) do (
+        if "!SLOT_CHOICE!"=="%%n" set "VALID_CHOICE=1"
+    )
+    if "!VALID_CHOICE!"=="0" (
+        echo   [X] Invalid choice: !SLOT_CHOICE!
+        pause
+        exit /b 1
+    )
+
+    set "CHOSEN_NAME=!SLOT_NAME_%SLOT_CHOICE%!"
+    set "CHOSEN_TOKEN=!SLOT_TOKEN_%SLOT_CHOICE%!"
+    goto :start_install
+) else (
+    goto :manual_input
+)
+
+:manual_input
 echo ===========================================================
 echo   Tunnel Configuration
 echo ===========================================================
@@ -274,10 +357,14 @@ if "!CHOSEN_NAME!"=="" (
     exit /b 1
 )
 
+:start_install
+echo.
+echo   Selected address: !CHOSEN_NAME!
+echo.
+
 :: -------------------------------------------------------
 :: STEP 1: Enable Remote Desktop
 :: -------------------------------------------------------
-echo.
 echo [1/5] Enabling Remote Desktop...
 
 reg add "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f >nul 2>&1
@@ -322,20 +409,25 @@ echo   [OK] Cloudflared downloaded (!FSIZE! bytes).
 set "CHK_DOWNLOAD=OK"
 
 :: -------------------------------------------------------
-:: STEP 3: Install as Windows service
+:: STEP 3: Install as Windows service (custom name)
 :: -------------------------------------------------------
 echo.
-echo [3/5] Installing as background service...
+echo [3/5] Installing as background service (%SVC_NAME%)...
 
-"!INSTALL_DIR!\cloudflared.exe" service install !CHOSEN_TOKEN!
+:: Create the service manually with our own name
+sc create %SVC_NAME% binPath= "\"!INSTALL_DIR!\cloudflared.exe\" tunnel run --token !CHOSEN_TOKEN!" start= delayed-auto obj= "LocalSystem" DisplayName= "Cloudflare Browser-RDP Tunnel" >nul 2>&1
 
-sc query cloudflared >nul 2>&1
+sc query %SVC_NAME% >nul 2>&1
 if %errorLevel% neq 0 (
     echo   [X] Service installation failed.
     goto :checklist
 )
 
-echo   [OK] Service installed.
+:: Set description
+sc description %SVC_NAME% "Cloudflare Browser-RDP Tunnel - provides browser-based remote desktop access via Zero Trust" >nul 2>&1
+
+echo   [OK] Service installed as '%SVC_NAME%'.
+echo        (Does NOT affect other cloudflared services)
 set "CHK_INSTALL=OK"
 
 :: -------------------------------------------------------
@@ -344,14 +436,11 @@ set "CHK_INSTALL=OK"
 echo.
 echo [4/5] Configuring watchdog (auto-recovery)...
 
-:: Delayed auto-start (waits for network stack)
-sc config cloudflared start= delayed-auto >nul 2>&1
-
 :: Restart on failure: 10s, 10s, 30s - reset counter after 24h
-sc failure cloudflared reset= 86400 actions= restart/10000/restart/10000/restart/30000 >nul 2>&1
+sc failure %SVC_NAME% reset= 86400 actions= restart/10000/restart/10000/restart/30000 >nul 2>&1
 
 :: Treat non-crash stops as failures too (sleep/hibernate recovery)
-sc failureflag cloudflared 1 >nul 2>&1
+sc failureflag %SVC_NAME% 1 >nul 2>&1
 
 echo   [OK] Watchdog configured (auto-restart on crash, sleep, logout).
 set "CHK_WATCHDOG=OK"
@@ -362,16 +451,16 @@ set "CHK_WATCHDOG=OK"
 echo.
 echo [5/5] Starting service...
 
-sc start cloudflared >nul 2>&1
+sc start %SVC_NAME% >nul 2>&1
 timeout /t 5 /nobreak >nul
 
-sc query cloudflared | findstr "RUNNING" >nul 2>&1
+sc query %SVC_NAME% | findstr "RUNNING" >nul 2>&1
 if %errorLevel% neq 0 (
     echo   [!] Service did not start immediately. Retrying...
     timeout /t 5 /nobreak >nul
-    sc start cloudflared >nul 2>&1
+    sc start %SVC_NAME% >nul 2>&1
     timeout /t 5 /nobreak >nul
-    sc query cloudflared | findstr "RUNNING" >nul 2>&1
+    sc query %SVC_NAME% | findstr "RUNNING" >nul 2>&1
     if %errorLevel% neq 0 (
         echo   [X] Service failed to start.
         goto :checklist
@@ -388,10 +477,10 @@ echo.
 echo [Verify] Checking connection to Cloudflare...
 timeout /t 5 /nobreak >nul
 
-sc query cloudflared | findstr "RUNNING" >nul 2>&1
+sc query %SVC_NAME% | findstr "RUNNING" >nul 2>&1
 if %errorLevel% equ 0 (
     timeout /t 3 /nobreak >nul
-    sc query cloudflared | findstr "RUNNING" >nul 2>&1
+    sc query %SVC_NAME% | findstr "RUNNING" >nul 2>&1
     if %errorLevel% equ 0 (
         echo   [OK] Tunnel active and stable.
         set "CHK_CONNECT=OK"
@@ -415,7 +504,7 @@ echo   [%CHK_ADMIN%] Administrator privileges
 echo   [%CHK_WINVER%] Windows edition (RDP capable)
 echo   [%CHK_RDP%] Remote Desktop enabled
 echo   [%CHK_DOWNLOAD%] Cloudflared downloaded
-echo   [%CHK_INSTALL%] Windows service installed
+echo   [%CHK_INSTALL%] Windows service installed (%SVC_NAME%)
 echo   [%CHK_WATCHDOG%] Watchdog configured
 echo   [%CHK_SERVICE%] Service started
 echo   [%CHK_CONNECT%] Connection to Cloudflare verified
@@ -443,6 +532,8 @@ if %FAILURES% equ 0 (
     echo   - Survives logout, sleep, hibernate, and lock screen
     echo   - Auto-restarts on crash (within 10 seconds)
     echo   - Works on any network (WiFi, ethernet, mobile hotspot)
+    echo.
+    echo   You can now close this window and delete this script.
     echo.
 ) else (
     echo.
