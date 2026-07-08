@@ -41,20 +41,39 @@ Before running the script, you need to create a tunnel in your Cloudflare dashbo
    - **URL:** `localhost:3389`
 9. Click **Save tunnel**.
 
-## Step 2: Cloudflare Access Setup
+## Step 2: Cloudflare Access Setup (CRITICAL)
 
-Now, protect the URL so only you can access it.
+Now, protect the URL and enable Browser Rendering. **This step must be done correctly or you will only see a white screen.**
+
+> **IMPORTANT:** The Access Application type MUST be `RDP` (Browser Rendering), NOT `Self-hosted`.
+> If configured as Self-hosted, the tunnel will connect but you will only see a blank white page.
 
 1. In the Zero Trust Dashboard, go to **Access** > **Applications**.
-2. Click **Add an application** and select **Self-hosted**.
-3. **Application Name:** e.g., `My Laptop RDP`
-4. **Session Duration:** 24h
-5. **Application domain:** Enter the exact domain you configured earlier (e.g., `rdp.example.com`).
-6. Scroll down to **Browser rendering settings** and select **RDP**.
-7. Click **Next**.
-8. Create a Policy (e.g., Name: `Allow Me`, Action: `Allow`).
-9. Under **Include**, select `Emails` and enter your email address.
-10. Click **Next**, then **Add application**.
+2. Click **Add an application**.
+3. Select **Browser Rendering** (NOT "Self-hosted").
+4. Select **RDP** as the protocol.
+5. Configure:
+   - **Application Name:** e.g., `My Laptop RDP`
+   - **Application domain:** Enter the exact domain you configured earlier (e.g., `rdp.example.com`)
+   - **Target criteria:** Hostname: any name, Port: `3389`, Protocol: `RDP`
+   - **Session Duration:** 24h
+   - **Skip interstitial:** Yes (recommended)
+6. Click **Next**.
+7. Create a Policy (e.g., Name: `Allow Me`, Action: `Allow`).
+8. Under **Include**, select `Emails` and enter your email address.
+9. Click **Next**, then **Add application**.
+
+### Verifying correct configuration
+
+If you only see a white screen after authenticating, your application is likely set to `Self-hosted` instead of `RDP`. You can verify via the API:
+
+```bash
+curl -s "https://api.cloudflare.com/client/v4/accounts/ACCOUNT_ID/access/apps" \
+  -H "Authorization: Bearer TOKEN" | jq '.result[] | select(.domain=="rdp.example.com") | .type'
+# Must return: "rdp" (not "self_hosted")
+```
+
+To fix: delete the application and recreate it using the steps above, making sure to select **Browser Rendering > RDP**.
 
 ## Step 3: Install on the Target PC
 
