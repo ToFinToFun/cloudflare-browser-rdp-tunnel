@@ -636,38 +636,234 @@ function Set-PresetLow {
     Save-PowerPreset 'Low'
 }
 
-function Show-PowerStatus {
-    $modernStandby = Test-ModernStandby
-    $isLaptop = Test-IsLaptop
+function Get-CurrentPowerState {
+    <#
+    .SYNOPSIS
+        Reads the current power-related settings from the system.
+        Returns a hashtable with boolean values for each setting.
+    #>
+    $state = @{
+        NicPowerSaveOff    = $false
+        NetworkInStandby   = $false
+        SleepDisabledAC    = $false
+        SleepDisabledDC    = $false
+        LidDoNothingAC     = $false
+        LidDoNothingDC     = $false
+        HibernateDisabled  = $false
+        ShutdownHidden     = $false
+    }
+    
+    # Check NIC power saving (check if any physical adapter has power management enabled)
+    try {
+        $adapters = Get-NetAdapter -Physical -ErrorAction SilentlyContinue
+        if ($adapters) {
+            $anyPowerManaged = $false
+            Get-CimInstance -ClassName MSPower_DeviceEnable -Namespace root\wmi -ErrorAction SilentlyContinue |
+                ForEach-Object {
+                    $iid = $_.InstanceName
+                    $isNic = Get-PnpDevice -Class Net -ErrorAction SilentlyContinue |
+                             Where-Object { $iid -like "$($_.InstanceId)*" }
+                    if ($isNic -and $_.Enable) { $anyPowerManaged = $true }
+                }
+            $state.NicPowerSaveOff = -not $anyPowerManaged
+        }
+    } catch { }
+    
+    # Check Connectivity in Standby
+    try {
+        $csOutput = powercfg /q SCHEME_CURRENT sub_none $CONN_IN_STANDBY 2>$null
+        $acMatch = ($csOutput | Select-String 'Current AC Power Setting Index:\s+0x([0-9a-f]+)').Matches
+        if ($acMatch.Count -gt 0) {
+            $state.NetworkInStandby = ([Convert]::ToInt32($acMatch[0].Groups[1].Value, 16) -eq 1)
+        }
+    } catch { }
+    
+    # Check Sleep timeouts
+    try {
+        $sleepOutput = powercfg /q SCHEME_CURRENT SUB_SLEEP STANDBYIDLE 2>$null
+        $acMatch = ($sleepOutput | Select-String 'Current AC Power Setting Index:\s+0x([0-9a-f]+)').Matches
+        $dcMatch = ($sleepOutput | Select-String 'Current DC Power Setting Index:\s+0x([0-9a-f]+)').Matches
+        if ($acMatch.Count -gt 0) {
+            $state.SleepDisabledAC = ([Convert]::ToInt32($acMatch[0].Groups[1].Value, 16) -eq 0)
+        }
+        if ($dcMatch.Count -gt 0) {
+            $state.SleepDisabledDC = ([Convert]::ToInt32($dcMatch[0].Groups[1].Value, 16) -eq 0)
+        }
+    } catch { }
+    
+    # Check Lid action
+    try {
+        $lidOutput = powercfg /q SCHEME_CURRENT $SUB_BUTTONS $LID_ACTION 2>$null
+        $acMatch = ($lidOutput | Select-String 'Current AC Power Setting Index:\s+0x([0-9a-f]+)').Matches
+        $dcMatch = ($lidOutput | Select-String 'Current DC Power Setting Index:\s+0x([0-9a-f]+)').Matches
+        if ($acMatch.Count -gt 0) {
+            $state.LidDoNothingAC = ([Convert]::ToInt32($acMatch[0].Groups[1].Value, 16) -eq 0)
+        }
+        if ($dcMatch.Count -gt 0) {
+            $state.LidDoNothingDC = ([Convert]::ToInt32($dcMatch[0].Groups[1].Value, 16) -eq 0)
+        }
+    } catch { }
+    
+    # Check Hibernate
+    try {
+        $hibOutput = powercfg /q SCHEME_CURRENT SUB_SLEEP HIBERNATEIDLE 2>$null
+        $acMatch = ($hibOutput | Select-String 'Current AC Power Setting Index:\s+0x([0-9a-f]+)').Matches
+        if ($acMatch.Count -gt 0) {
+            $state.HibernateDisabled = ([Convert]::ToInt32($acMatch[0].Groups[1].Value, 16) -eq 0)
+        }
+    } catch { }
+    
+    # Check shutdown button hidden
+    try {
+        $noClose = Get-ItemProperty -Path $REG_EXPLORER_POL -Name 'NoClose' -ErrorAction SilentlyContinue
+        $state.ShutdownHidden = ($noClose -and $noClose.NoClose -eq 1)
+    } catch { }
+    
+    return $state
+}
+
+function Show-PowerMatrix {
+    <#
+    .SYNOPSIS
+        Displays a matrix showing current status vs all presets.
+    #>
+    param(
+        [hashtable]$State,
+        [bool]$ModernStandby,
+        [bool]$IsLaptop
+    )
+    
     $marker = Get-PowerPreset
     
     Write-Host ""
-    Write-Host "  Current power settings:" -ForegroundColor White
-    Write-Host "    Device type    : $(if ($isLaptop) { 'Laptop' } else { 'Desktop' })"
-    Write-Host "    Modern Standby : $(if ($modernStandby) { 'Supported' } else { 'Not supported (classic S3)' })"
+    Write-Host "  YOUR PC" -ForegroundColor White
+    Write-Host "    Type           : $(if ($IsLaptop) { 'Laptop' } else { 'Desktop' })"
+    Write-Host "    Modern Standby : $(if ($ModernStandby) { 'Yes (S0)' } else { 'No (classic S3)' })"
     Write-Host "    Active preset  : $(if ($marker) { $marker } else { 'None (Windows default)' })"
+    Write-Host ""
     
-    try {
-        $sleepAC = (powercfg /q SCHEME_CURRENT SUB_SLEEP STANDBYIDLE | Select-String 'Current AC Power Setting Index:\s+0x([0-9a-f]+)').Matches
-        if ($sleepAC.Count -gt 0) {
-            $secs = [Convert]::ToInt32($sleepAC[0].Groups[1].Value, 16)
-            $txt = if ($secs -eq 0) { 'Never' } else { "$([math]::Round($secs/60)) min" }
-            Write-Host "    Sleep (AC)     : $txt"
+    # Column headers
+    $col1 = 28  # Setting name width
+    $col2 = 9   # Current width
+    $col3 = 6   # Low+ width
+    $col4 = 10  # Balanced width
+    $col5 = 6   # High width
+    $col6 = 5   # MAX width
+    
+    $header = "  {0,-$col1} {1,-$col2} {2,-$col3} {3,-$col4} {4,-$col5} {5,-$col6}" -f 'Setting', 'Current', 'Low+', 'Balanced', 'High', 'MAX'
+    $divider = "  " + ("-" * ($col1 + $col2 + $col3 + $col4 + $col5 + $col6 + 5))
+    
+    Write-Host $header -ForegroundColor Cyan
+    Write-Host $divider -ForegroundColor DarkGray
+    
+    # Helper to format check/cross/dash
+    function Fmt-Cell { param([string]$Val) return $Val }
+    
+    # Row definitions: SettingName, CurrentBool, Low+, Balanced, High, MAX
+    # Values: $true = required by preset, $false = not changed, $null = N/A
+    $rows = @(
+        @{
+            Name = 'NIC power saving off'
+            Current = $State.NicPowerSaveOff
+            LowPlus = $true; Balanced = $true; High = $true; Max = $true
+        },
+        @{
+            Name = 'Network alive in standby'
+            Current = $State.NetworkInStandby
+            LowPlus = $true; Balanced = $true; High = $true; Max = $true
+            BalancedNote = '(AC)'
+        },
+        @{
+            Name = 'Sleep disabled (AC)'
+            Current = $State.SleepDisabledAC
+            LowPlus = $false; Balanced = $true; High = $true; Max = $true
+        },
+        @{
+            Name = 'Sleep disabled (battery)'
+            Current = $State.SleepDisabledDC
+            LowPlus = $false; Balanced = $false; High = $true; Max = $true
+        },
+        @{
+            Name = 'Lid close = do nothing (AC)'
+            Current = $State.LidDoNothingAC
+            LowPlus = $false; Balanced = $true; High = $true; Max = $true
+        },
+        @{
+            Name = 'Lid close = do nothing (bat)'
+            Current = $State.LidDoNothingDC
+            LowPlus = $false; Balanced = $false; High = $true; Max = $true
+        },
+        @{
+            Name = 'Hibernate disabled'
+            Current = $State.HibernateDisabled
+            LowPlus = $false; Balanced = $true; High = $true; Max = $true
+        },
+        @{
+            Name = 'Shutdown button hidden'
+            Current = $State.ShutdownHidden
+            LowPlus = $false; Balanced = $false; High = $false; Max = $true
         }
-        $sleepDC = (powercfg /q SCHEME_CURRENT SUB_SLEEP STANDBYIDLE | Select-String 'Current DC Power Setting Index:\s+0x([0-9a-f]+)').Matches
-        if ($sleepDC.Count -gt 0) {
-            $secs = [Convert]::ToInt32($sleepDC[0].Groups[1].Value, 16)
-            $txt = if ($secs -eq 0) { 'Never' } else { "$([math]::Round($secs/60)) min" }
-            Write-Host "    Sleep (battery): $txt"
+    )
+    
+    foreach ($row in $rows) {
+        # Current column
+        if ($row.Current) { $curTxt = [char]0x2713; $curColor = 'Green' }
+        else { $curTxt = [char]0x2717; $curColor = 'Red' }
+        
+        # Preset columns
+        $presetCols = @('LowPlus', 'Balanced', 'High', 'Max')
+        $presetTxts = @()
+        $presetColors = @()
+        
+        foreach ($p in $presetCols) {
+            if ($row[$p] -eq $true) {
+                # This preset requires this setting
+                if ($row.Current) {
+                    $presetTxts += [string][char]0x2713
+                    $presetColors += 'Green'
+                } else {
+                    $presetTxts += [string][char]0x2713
+                    $presetColors += 'Yellow'
+                }
+            } else {
+                $presetTxts += '-'
+                $presetColors += 'DarkGray'
+            }
         }
-    } catch { }
+        
+        # Print row
+        Write-Host -NoNewline ("  {0,-$col1} " -f $row.Name)
+        Write-Host -NoNewline ("{0,-$col2} " -f $curTxt) -ForegroundColor $curColor
+        Write-Host -NoNewline ("{0,-$col3} " -f $presetTxts[0]) -ForegroundColor $presetColors[0]
+        Write-Host -NoNewline ("{0,-$col4} " -f $presetTxts[1]) -ForegroundColor $presetColors[1]
+        Write-Host -NoNewline ("{0,-$col5} " -f $presetTxts[2]) -ForegroundColor $presetColors[2]
+        Write-Host ("{0,-$col6}" -f $presetTxts[3]) -ForegroundColor $presetColors[3]
+    }
+    
+    Write-Host $divider -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Host "  $([char]0x2713) = active/will be set   - = not changed by preset" -ForegroundColor Gray
+    if (-not $IsLaptop) {
+        Write-Host "  (Battery/lid settings shown but not relevant for desktops)" -ForegroundColor DarkGray
+    }
+    if (-not $ModernStandby) {
+        Write-Host "  Low+ requires Modern Standby (S0) - NOT available on this PC" -ForegroundColor DarkGray
+    }
+    Write-Host ""
+    
+    # Risks section
+    Write-Host "  RISKS:" -ForegroundColor Yellow
+    Write-Host "    Low+     : Minimal. Only keeps network alive." -ForegroundColor Gray
+    Write-Host "    Balanced : Battery drains faster on AC (no sleep). Normal on battery." -ForegroundColor Gray
+    Write-Host "    High     : Battery will drain to zero if unplugged and forgotten." -ForegroundColor Gray
+    Write-Host "    MAX      : Same as High + shutdown button hidden (HKCU, this user only)." -ForegroundColor Gray
     Write-Host ""
 }
 
 function Show-PowerManagement {
     <#
     .SYNOPSIS
-        Interactive power management menu.
+        Interactive power management menu with status matrix.
         Can be called standalone or as part of install flow.
         Returns the chosen preset name or $null if skipped.
     #>
@@ -677,44 +873,31 @@ function Show-PowerManagement {
     
     $modernStandby = Test-ModernStandby
     $isLaptop = Test-IsLaptop
+    $currentState = Get-CurrentPowerState
     
     Write-Host ""
     Write-Host "===========================================================" -ForegroundColor Cyan
     Write-Host "  POWER MANAGEMENT - RDP Availability" -ForegroundColor Cyan
     Write-Host "===========================================================" -ForegroundColor Cyan
-    
-    if (-not $SetupStep) { Show-PowerStatus }
-    
     Write-Host ""
     Write-Host "  For reliable RDP access, the PC should stay awake and" -ForegroundColor White
-    Write-Host "  keep its network connection active. Choose a preset:" -ForegroundColor White
-    Write-Host ""
-    Write-Host "  [1] MAX" -ForegroundColor White
-    Write-Host "      Always awake + connected (AC and battery)."
-    Write-Host "      Lid does nothing. Shutdown button hidden (this user)."
-    Write-Host ""
-    Write-Host "  [2] High" -ForegroundColor White
-    Write-Host "      Always awake + connected (AC and battery)."
-    Write-Host "      Lid does nothing. Uses more battery."
-    Write-Host ""
-    Write-Host "  [3] Balanced (RECOMMENDED)" -ForegroundColor Green
-    Write-Host "      Always awake + connected WHEN CHARGER IS PLUGGED IN."
-    Write-Host "      Normal power saving on battery."
-    Write-Host ""
+    Write-Host "  keep its network connection active." -ForegroundColor White
     
-    if ($modernStandby) {
-        Write-Host "  [4] Low+" -ForegroundColor White
-        Write-Host "      Sleeps normally, but network stays alive in standby."
-        Write-Host "      Requires Modern Standby (S0) - supported on this PC."
-    }
-    else {
-        Write-Host "  [4] Low+ (NOT AVAILABLE ON THIS PC)" -ForegroundColor DarkGray
-        Write-Host "      Requires Modern Standby (S0). This PC uses classic S3." -ForegroundColor DarkGray
-    }
+    # Show the status matrix
+    Show-PowerMatrix -State $currentState -ModernStandby $modernStandby -IsLaptop $isLaptop
+    
+    # Preset selection
+    Write-Host "  Choose a preset to apply:" -ForegroundColor White
     Write-Host ""
-    Write-Host "  [5] Low (reset to Windows defaults)" -ForegroundColor White
-    Write-Host "      Restores all power settings to factory defaults."
-    Write-Host "      PC may sleep and lose network - you must wake it manually."
+    Write-Host "  [1] MAX          - Maximum availability (never off, ever)" -ForegroundColor White
+    Write-Host "  [2] High         - Always on, but shutdown button stays" -ForegroundColor White
+    Write-Host "  [3] Balanced     - Always on when plugged in (RECOMMENDED)" -ForegroundColor Green
+    if ($modernStandby) {
+        Write-Host "  [4] Low+         - Network stays alive, sleep unchanged" -ForegroundColor White
+    } else {
+        Write-Host "  [4] Low+         - NOT AVAILABLE (requires Modern Standby)" -ForegroundColor DarkGray
+    }
+    Write-Host "  [5] Low (reset)  - Restore Windows defaults" -ForegroundColor White
     Write-Host ""
     
     if ($SetupStep) {
